@@ -154,8 +154,15 @@ func (c *cluster) detectCephVersion(rookImage, cephImage string, timeout time.Du
 
 func (c *cluster) validateCephVersion(version *cephver.CephVersion) error {
 	if !c.Spec.External.Enable {
-		if !version.IsAtLeast(cephver.Minimum) {
-			return errors.Errorf("the version does not meet the minimum version %q", cephver.Minimum.String())
+		var min_ver cephver.CephVersion
+		if version.IsNes {
+			min_ver = cephver.MinimumNES
+		} else {
+			min_ver = cephver.Minimum
+		}
+
+		if !version.IsAtLeast(min_ver) {
+			return errors.Errorf("the version does not meet the minimum version %q", min_ver.String())
 		}
 
 		if !version.Supported() {
@@ -193,7 +200,7 @@ func (c *cluster) validateCephVersion(version *cephver.CephVersion) error {
 
 	clusterInfo.CephVersion = *version
 	if c.Spec.External.Enable && c.Spec.CephVersion.Image != "" {
-		c.ClusterInfo.CephVersion, err = controller.ValidateCephVersionsBetweenLocalAndExternalClusters(c.context, c.ClusterInfo)
+		c.ClusterInfo.CephVersion, err = controller.ValidateCephVersionsBetweenLocalAndExternalClusters(c.context, clusterInfo)
 		if err != nil {
 			return errors.Wrap(err, "failed to validate ceph version between external and local")
 		}
