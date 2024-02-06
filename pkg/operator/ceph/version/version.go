@@ -277,6 +277,11 @@ func (v *CephVersion) IsAtLeastApex() bool {
 	return v.IsAtLeast(Apex)
 }
 
+// IsAtLeastBelfry check that the NES version is at least Belfry
+func (v *CephVersion) IsAtLeastBelfry() bool {
+	return v.IsAtLeast(Belfry)
+}
+
 // IsIdentical checks if Ceph versions are identical
 func IsIdentical(a, b CephVersion) bool {
 	if a.Major == b.Major {
