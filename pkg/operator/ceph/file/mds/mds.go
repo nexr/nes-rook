@@ -233,7 +233,7 @@ func (c *Cluster) isCephUpgrade() (bool, error) {
 			return false, err
 		}
 		if cephver.IsSuperior(c.clusterInfo.CephVersion, *currentVersion) {
-			logger.Debugf("ceph version for MDS %q is %q and target version is %q", key, currentVersion, c.clusterInfo.CephVersion)
+			logger.Debugf("ceph version for MDS %q is %q and target version is %q", key, currentVersion, c.clusterInfo.CephVersion.String())
 			return true, err
 		}
 	}

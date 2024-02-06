@@ -32,6 +32,7 @@ type CephVersion struct {
 	Extra    int
 	Build    int
 	CommitID string
+	IsNes    bool
 }
 
 const (
@@ -40,31 +41,38 @@ const (
 
 var (
 	// Minimum supported version is 14.2.5
-	Minimum = CephVersion{14, 2, 5, 0, ""}
+	Minimum = CephVersion{14, 2, 5, 0, "", false}
 	// Nautilus Ceph version
-	Nautilus = CephVersion{14, 0, 0, 0, ""}
+	Nautilus = CephVersion{14, 0, 0, 0, "", false}
 	// Octopus Ceph version
-	Octopus = CephVersion{15, 0, 0, 0, ""}
+	Octopus = CephVersion{15, 0, 0, 0, "", false}
 	// Pacific Ceph version
-	Pacific = CephVersion{16, 0, 0, 0, ""}
+	Pacific = CephVersion{16, 0, 0, 0, "", false}
 	// Quincy Ceph version
-	Quincy = CephVersion{17, 0, 0, 0, ""}
+	Quincy = CephVersion{17, 0, 0, 0, "", false}
+
+	// Minimum supported version of NES is 1.0.0
+	MinimumNES = CephVersion{1, 0, 0, 0, "", true}
+	// Apex Ceph version
+	Apex = CephVersion{1, 0, 0, 0, "", true}
+	// Belfry Ceph version
+	Belfry = CephVersion{2, 0, 0, 0, "", true}
 
 	// cephVolumeLVMDiskSortingCephVersion introduced a major regression in c-v and thus is not suitable for production
 	cephVolumeLVMDiskSortingCephVersion = CephVersion{Major: 14, Minor: 2, Extra: 13}
 
 	// supportedVersions are production-ready versions that rook supports
-	supportedVersions = []CephVersion{Nautilus, Octopus, Pacific}
+	supportedVersions = []CephVersion{Nautilus, Apex, Octopus, Belfry, Pacific}
 
 	// unsupportedVersions are possibly Ceph pin-point release that introduced breaking changes and not recommended
 	unsupportedVersions = []CephVersion{cephVolumeLVMDiskSortingCephVersion}
 
 	// for parsing the output of `ceph --version`
-	versionPattern = regexp.MustCompile(`ceph version (\d+)\.(\d+)\.(\d+)`)
+	versionPattern = regexp.MustCompile(`ceph version (\d+)\.(\d+)\.(\d+)(\.nes){0,1}`)
 
 	// For a build release the output is "ceph version 14.2.4-64.el8cp"
 	// So we need to detect the build version change
-	buildVersionPattern = regexp.MustCompile(`ceph version (\d+)\.(\d+)\.(\d+)\-(\d+)`)
+	buildVersionPattern = regexp.MustCompile(`ceph version (\d+)\.(\d+)\.(\d+)(\.nes){0,1}-(\d+)`)
 
 	// for parsing the commit hash in the ceph --version output. For example:
 	// input = `ceph version 14.2.11-139 (5c0dc966af809fd1d429ec7bac48962a746af243) nautilus (stable)`
@@ -75,29 +83,47 @@ var (
 )
 
 func (v *CephVersion) String() string {
-	return fmt.Sprintf("%d.%d.%d-%d %s",
-		v.Major, v.Minor, v.Extra, v.Build, v.ReleaseName())
+	var ret_v string
+
+	ret_v = fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Extra)
+
+	if v.IsNes {
+		ret_v += ".nes"
+	}
+
+	ret_v += fmt.Sprintf("-%d %s", v.Build, v.ReleaseName())
+	return ret_v
 }
 
 // CephVersionFormatted returns the Ceph version in a human readable format
 func (v *CephVersion) CephVersionFormatted() string {
-	return fmt.Sprintf("ceph version %d.%d.%d-%d %s",
-		v.Major, v.Minor, v.Extra, v.Build, v.ReleaseName())
+	return "ceph version " + v.String()
 }
 
 // ReleaseName is the name of the Ceph release
 func (v *CephVersion) ReleaseName() string {
-	switch v.Major {
-	case Nautilus.Major:
-		return "nautilus"
-	case Octopus.Major:
-		return "octopus"
-	case Pacific.Major:
-		return "pacific"
-	case Quincy.Major:
-		return "quincy"
-	default:
-		return unknownVersionString
+	if v.IsNes {
+		switch v.Major {
+		case Apex.Major:
+			return "apex"
+		case Belfry.Major:
+			return "apex"
+		default:
+			return unknownVersionString
+		}
+	} else {
+		switch v.Major {
+		case Nautilus.Major:
+			return "nautilus"
+		case Octopus.Major:
+			return "octopus"
+		case Pacific.Major:
+			return "pacific"
+		case Quincy.Major:
+			return "quincy"
+		default:
+			return unknownVersionString
+		}
 	}
 }
 
@@ -125,13 +151,15 @@ func ExtractCephVersion(src string) (*CephVersion, error) {
 		return nil, errors.Errorf("failed to parse version extra part: %q", versionMatch[3])
 	}
 
+	isnes := (versionMatch[4] == ".nes")
+
 	// See if we are running on a build release
 	buildVersionMatch := buildVersionPattern.FindStringSubmatch(src)
 	// We don't need to handle any error here, so let's jump in only when "mm" has content
 	if buildVersionMatch != nil {
-		build, err = strconv.Atoi(buildVersionMatch[4])
+		build, err = strconv.Atoi(buildVersionMatch[5])
 		if err != nil {
-			logger.Warningf("failed to convert version build number part %q to an integer, ignoring", buildVersionMatch[4])
+			logger.Warningf("failed to convert version build number part %q to an integer, ignoring", buildVersionMatch[5])
 		}
 	}
 
@@ -140,7 +168,7 @@ func ExtractCephVersion(src string) (*CephVersion, error) {
 		commitID = commitIDMatch[1]
 	}
 
-	return &CephVersion{major, minor, extra, build, commitID}, nil
+	return &CephVersion{major, minor, extra, build, commitID, isnes}, nil
 }
 
 // Supported checks if a given release is supported
@@ -164,11 +192,11 @@ func (v *CephVersion) Unsupported() bool {
 }
 
 func (v *CephVersion) isRelease(other CephVersion) bool {
-	return v.Major == other.Major
+	return v.Major == other.Major && v.IsNes == other.IsNes
 }
 
 func (v *CephVersion) isExactly(other CephVersion) bool {
-	return v.Major == other.Major && v.Minor == other.Minor && v.Extra == other.Extra
+	return v.Major == other.Major && v.Minor == other.Minor && v.Extra == other.Extra && v.IsNes == other.IsNes
 }
 
 // IsNautilus checks if the Ceph version is Nautilus
@@ -189,6 +217,16 @@ func (v *CephVersion) IsPacific() bool {
 // IsQuincy checks if the Ceph version is Quincy
 func (v *CephVersion) IsQuincy() bool {
 	return v.isRelease(Quincy)
+}
+
+// IsApex checks if the NES version is Apex
+func (v *CephVersion) IsApex() bool {
+	return v.isRelease(Apex)
+}
+
+// IsBelfry checks if the NES version is Belfry
+func (v *CephVersion) IsBelfry() bool {
+	return v.isRelease(Belfry)
 }
 
 // IsAtLeast checks a given Ceph version is at least a given one
@@ -234,6 +272,11 @@ func (v *CephVersion) IsAtLeastNautilus() bool {
 	return v.IsAtLeast(Nautilus)
 }
 
+// IsAtLeastApex check that the NES version is at least Apex
+func (v *CephVersion) IsAtLeastApex() bool {
+	return v.IsAtLeast(Apex)
+}
+
 // IsIdentical checks if Ceph versions are identical
 func IsIdentical(a, b CephVersion) bool {
 	if a.Major == b.Major {
@@ -241,7 +284,9 @@ func IsIdentical(a, b CephVersion) bool {
 			if a.Extra == b.Extra {
 				if a.Build == b.Build {
 					if a.CommitID == b.CommitID {
-						return true
+						if a.IsNes == b.IsNes {
+							return true
+						}
 					}
 				}
 			}
@@ -254,17 +299,23 @@ func IsIdentical(a, b CephVersion) bool {
 // IsSuperior checks if a given version if superior to another one
 func IsSuperior(a, b CephVersion) bool {
 	if a.Major > b.Major {
-		return true
+		if a.IsNes == b.IsNes {
+			return true
+		}
 	}
 	if a.Major == b.Major {
 		if a.Minor > b.Minor {
-			return true
+			if a.IsNes == b.IsNes {
+				return true
+			}
 		}
 	}
 	if a.Major == b.Major {
 		if a.Minor == b.Minor {
 			if a.Extra > b.Extra {
-				return true
+				if a.IsNes == b.IsNes {
+					return true
+				}
 			}
 		}
 	}
@@ -272,10 +323,9 @@ func IsSuperior(a, b CephVersion) bool {
 		if a.Minor == b.Minor {
 			if a.Extra == b.Extra {
 				if a.Build > b.Build {
-					return true
-				}
-				if a.CommitID != b.CommitID {
-					return true
+					if a.IsNes == b.IsNes {
+						return true
+					}
 				}
 			}
 		}
@@ -287,17 +337,23 @@ func IsSuperior(a, b CephVersion) bool {
 // IsInferior checks if a given version if inferior to another one
 func IsInferior(a, b CephVersion) bool {
 	if a.Major < b.Major {
-		return true
+		if a.IsNes == b.IsNes {
+			return true
+		}
 	}
 	if a.Major == b.Major {
 		if a.Minor < b.Minor {
-			return true
+			if a.IsNes == b.IsNes {
+				return true
+			}
 		}
 	}
 	if a.Major == b.Major {
 		if a.Minor == b.Minor {
 			if a.Extra < b.Extra {
-				return true
+				if a.IsNes == b.IsNes {
+					return true
+				}
 			}
 		}
 	}
@@ -305,7 +361,9 @@ func IsInferior(a, b CephVersion) bool {
 		if a.Minor == b.Minor {
 			if a.Extra == b.Extra {
 				if a.Build < b.Build {
-					return true
+					if a.IsNes == b.IsNes {
+						return true
+					}
 				}
 			}
 		}
@@ -319,8 +377,8 @@ func IsInferior(a, b CephVersion) bool {
 func ValidateCephVersionsBetweenLocalAndExternalClusters(localVersion, externalVersion CephVersion) error {
 	logger.Debugf("local version is %q, external version is %q", localVersion.String(), externalVersion.String())
 
-	// We only support Nautilus or newer
-	if !externalVersion.IsAtLeastNautilus() {
+	// We only support Nautilus, Apex or newer
+	if (externalVersion.IsNes && !externalVersion.IsAtLeastApex()) || (!externalVersion.IsNes && !externalVersion.IsAtLeastNautilus()) {
 		return errors.Errorf("unsupported ceph version %q, need at least nautilus, delete your cluster CR and create a new one with a correct ceph version", externalVersion.String())
 	}
 
