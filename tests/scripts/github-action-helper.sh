@@ -23,6 +23,7 @@ set -xe
 NETWORK_ERROR="connection reset by peer"
 SERVICE_UNAVAILABLE_ERROR="Service Unavailable"
 INTERNAL_ERROR="INTERNAL_ERROR"
+INTERNAL_SERVER_ERROR="500 Internal Server Error"
 
 #############
 # FUNCTIONS #
@@ -56,16 +57,35 @@ function use_local_disk() {
 }
 
 function use_local_disk_for_integration_test() {
+  sudo udevadm control --log-priority=debug
   sudo swapoff --all --verbose
   sudo umount /mnt
+  sudo sed -i.bak '/\/mnt/d' /etc/fstab
   # search for the device since it keeps changing between sda and sdb
   PARTITION="${BLOCK}1"
   sudo wipefs --all --force "$PARTITION"
-  sudo lsblk
+  sudo dd if=/dev/zero of="${PARTITION}" bs=1M count=1
+  sudo lsblk --bytes
   # add a udev rule to force the disk partitions to ceph
   # we have observed that some runners keep detaching/re-attaching the additional disk overriding the permissions to the default root:disk
   # for more details see: https://github.com/rook/rook/issues/7405
   echo "SUBSYSTEM==\"block\", ATTR{size}==\"29356032\", ACTION==\"add\", RUN+=\"/bin/chown 167:167 $PARTITION\"" | sudo tee -a /etc/udev/rules.d/01-rook.rules
+  # for below, see: https://access.redhat.com/solutions/1465913
+  block_base="$(basename "${BLOCK}")"
+  echo "ACTION==\"add|change\", KERNEL==\"${block_base}\", OPTIONS:=\"nowatch\"" | sudo tee -a /etc/udev/rules.d/99-z-rook-nowatch.rules
+  # The partition is still getting reloaded occasionally during operation. See https://github.com/rook/rook/issues/8975
+  # Try issuing some disk-inspection commands to jog the system so it won't reload the partitions
+  # during OSD provisioning.
+  sudo udevadm control --reload-rules || true
+  sudo udevadm trigger || true
+  time sudo udevadm settle || true
+  sudo partprobe || true
+  sudo lsblk --noheadings --pairs "${BLOCK}" || true
+  sudo sgdisk --print "${BLOCK}" || true
+  sudo udevadm info --query=property "${BLOCK}" || true
+  sudo lsblk --noheadings --pairs "${PARTITION}" || true
+  journalctl -o short-precise --dmesg | tail -40 || true
+  cat /etc/fstab || true
 }
 
 function create_partitions_for_osds() {
@@ -88,6 +108,14 @@ function create_bluestore_partitions_and_pvcs_for_wal(){
   tests/scripts/localPathPV.sh "$BLOCK_PART" "$DB_PART" "$WAL_PART"
 }
 
+function collect_udev_logs_in_background() {
+  local log_dir="${1:-"/home/runner/work/rook/rook/tests/integration/_output/tests"}"
+  mkdir -p "${log_dir}"
+  udevadm monitor --property &> "${log_dir}"/udev-monitor-property.txt &
+  udevadm monitor --kernel &> "${log_dir}"/udev-monitor-kernel.txt &
+  udevadm monitor --udev &> "${log_dir}"/udev-monitor-udev.txt &
+}
+
 function build_rook() {
   build_type=build
   if [ -n "$1" ]; then
@@ -106,6 +134,10 @@ function build_rook() {
           continue
         ;;
         *"$INTERNAL_ERROR"*)
+          echo "network failure occurred, retrying..."
+          continue
+        ;;
+        *"$INTERNAL_SERVER_ERROR"*)
           echo "network failure occurred, retrying..."
           continue
         ;;
@@ -131,9 +163,25 @@ function build_rook_all() {
 
 function validate_yaml() {
   cd cluster/examples/kubernetes/ceph
+
+  # create the Rook CRDs and other resources
   kubectl create -f crds.yaml -f common.yaml
+
+  # create the volume replication CRDs
+  replication_version=v0.1.0
+  replication_url="https://raw.githubusercontent.com/csi-addons/volume-replication-operator/${replication_version}/config/crd/bases"
+  kubectl create -f "${replication_url}/replication.storage.openshift.io_volumereplications.yaml"
+  kubectl create -f "${replication_url}/replication.storage.openshift.io_volumereplicationclasses.yaml"
+
+  #create the KEDA CRDS
+  keda_version=2.4.0
+  keda_url="https://github.com/kedacore/keda/releases/download/v${keda_version}/keda-${keda_version}.yaml"
+  kubectl apply -f "${keda_url}"
+
   # skipping folders and some yamls that are only for openshift.
-  kubectl create $(ls -I scc.yaml -I "*-openshift.yaml" -I "*.sh" -I "*.py" -p | grep -v / | awk ' { print " -f " $1 } ') --dry-run
+  manifests="$(find . -maxdepth 1 -type f -name '*.yaml' -and -not -name '*openshift*' -and -not -name 'scc.yaml')"
+  with_f_arg="$(echo "$manifests" | awk '{printf " -f %s",$1}')" # don't add newline
+  kubectl create ${with_f_arg} --dry-run=client
 }
 
 function create_cluster_prerequisites() {
@@ -142,7 +190,7 @@ function create_cluster_prerequisites() {
 }
 
 function deploy_manifest_with_local_build() {
-  sed -i "s|image: rook/ceph:[0-9a-zA-Z.]*|image: rook/ceph:local-build|g" $1
+  sed -i "s|image: rook/ceph:v1.7.11|image: rook/ceph:local-build|g" $1
   kubectl create -f $1
 }
 
@@ -161,10 +209,31 @@ function deploy_cluster() {
 }
 
 function wait_for_prepare_pod() {
-  timeout 180 sh -c 'until kubectl -n rook-ceph logs -f job/$(kubectl -n rook-ceph get job -l app=rook-ceph-osd-prepare -o jsonpath='{.items[0].metadata.name}'); do sleep 5; done' || true
-  timeout 60 sh -c 'until kubectl -n rook-ceph logs $(kubectl -n rook-ceph get pod -l app=rook-ceph-osd,ceph_daemon_id=0 -o jsonpath='{.items[*].metadata.name}') --all-containers; do echo "waiting for osd container" && sleep 1; done' || true
-  kubectl -n rook-ceph describe job/$(kubectl -n rook-ceph get pod -l app=rook-ceph-osd-prepare -o jsonpath='{.items[*].metadata.name}') || true
-  kubectl -n rook-ceph describe deploy/rook-ceph-osd-0 || true
+  get_pod_cmd=(kubectl --namespace rook-ceph get pod --no-headers)
+  timeout=450
+  start_time="${SECONDS}"
+  while [[ $(( SECONDS - start_time )) -lt $timeout ]]; do
+    pod="$("${get_pod_cmd[@]}" --selector=app=rook-ceph-osd-prepare --output custom-columns=NAME:.metadata.name,PHASE:status.phase | awk 'FNR <= 1')"
+    if echo "$pod" | grep 'Running\|Succeeded\|Failed'; then break; fi
+    echo 'waiting for at least one osd prepare pod to be running or finished'
+    sleep 5
+  done
+  pod="$("${get_pod_cmd[@]}" --selector app=rook-ceph-osd-prepare --output name | awk 'FNR <= 1')"
+  kubectl --namespace rook-ceph logs --follow "$pod"
+  timeout=60
+  start_time="${SECONDS}"
+  while [[ $(( SECONDS - start_time )) -lt $timeout ]]; do
+    pod="$("${get_pod_cmd[@]}" --selector app=rook-ceph-osd,ceph_daemon_id=0 --output custom-columns=NAME:.metadata.name,PHASE:status.phase)"
+    if echo "$pod" | grep 'Running'; then break; fi
+    echo 'waiting for OSD 0 pod to be running'
+    sleep 1
+  done
+  # getting the below logs is a best-effort attempt, so use '|| true' to allow failures
+  pod="$("${get_pod_cmd[@]}" --selector app=rook-ceph-osd,ceph_daemon_id=0 --output name)" || true
+  kubectl --namespace rook-ceph logs "$pod" || true
+  job="$(kubectl --namespace rook-ceph get job --selector app=rook-ceph-osd-prepare --output name | awk 'FNR <= 1')" || true
+  kubectl -n rook-ceph describe "$job" || true
+  kubectl -n rook-ceph describe deployment/rook-ceph-osd-0 || true
 }
 
 function wait_for_ceph_to_be_ready() {
@@ -194,58 +263,67 @@ function create_LV_on_disk() {
   kubectl create -f cluster/examples/kubernetes/ceph/common.yaml
 }
 
-function deploy_first_rook_cluster() {
-  BLOCK=$(sudo lsblk|awk '/14G/ {print $1}'| head -1)
-  cd cluster/examples/kubernetes/ceph/
-  kubectl create -f crds.yaml -f common.yaml -f operator.yaml
-  yq w -i -d1 cluster-test.yaml spec.dashboard.enabled false
-  yq w -i -d1 cluster-test.yaml spec.storage.useAllDevices false
-  yq w -i -d1 cluster-test.yaml spec.storage.deviceFilter ${BLOCK}1
-  kubectl create -f cluster-test.yaml -f toolbox.yaml
-}
+function generate_tls_config {
+DIR=$1
+SERVICE=$2
+NAMESPACE=$3
+IP=$4
+if [ -z "${IP}" ]; then
+    IP=127.0.0.1
+fi
 
-function wait_for_rgw_pods() {
-  for i in {1..120}; do kubectl -n $1 get pod -l app=rook-ceph-rgw -o jsonpath='{.items[0].metadata.name}' && echo -e "\nrgw pods found" && break || echo -e "\nwaiting for rgw pods"; sleep 5; done
-}
+  openssl genrsa -out "${DIR}"/"${SERVICE}".key 2048
 
-function deploy_second_rook_cluster() {
-  BLOCK=$(sudo lsblk|awk '/14G/ {print $1}'| head -1)
-  cd cluster/examples/kubernetes/ceph/
-  NAMESPACE=rook-ceph-secondary envsubst < common-second-cluster.yaml | kubectl create -f -
-  sed -i 's/namespace: rook-ceph/namespace: rook-ceph-secondary/g' cluster-test.yaml
-  yq w -i -d1 cluster-test.yaml spec.storage.deviceFilter ${BLOCK}2
-  yq w -i -d1 cluster-test.yaml spec.dataDirHostPath "/var/lib/rook-external"
-  yq w -i toolbox.yaml metadata.namespace rook-ceph-secondary
-  kubectl create -f cluster-test.yaml -f toolbox.yaml
-}
+  cat <<EOF >"${DIR}"/csr.conf
+[req]
+req_extensions = v3_req
+distinguished_name = req_distinguished_name
+[req_distinguished_name]
+[ v3_req ]
+basicConstraints = CA:FALSE
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @alt_names
+[alt_names]
+DNS.1 = ${SERVICE}
+DNS.2 = ${SERVICE}.${NAMESPACE}
+DNS.3 = ${SERVICE}.${NAMESPACE}.svc
+DNS.4 = ${SERVICE}.${NAMESPACE}.svc.cluster.local
+IP.1  = ${IP}
+EOF
 
-function write_object_to_cluster1_read_from_cluster2() {
-  cd cluster/examples/kubernetes/ceph/
-  echo "[default]" > s3cfg
-  echo "host_bucket = no.way.in.hell" >> ./s3cfg
-  echo "use_https = False" >> ./s3cfg
-  fallocate -l 1M ./1M.dat
-  echo "hello world" >> ./1M.dat
-  CLUSTER_1_IP_ADDR=$(kubectl -n rook-ceph get svc rook-ceph-rgw-multisite-store -o jsonpath="{.spec.clusterIP}")
-  BASE64_ACCESS_KEY=$(kubectl -n rook-ceph get secrets realm-a-keys -o jsonpath="{.data.access-key}")
-  BASE64_SECRET_KEY=$(kubectl -n rook-ceph get secrets realm-a-keys -o jsonpath="{.data.secret-key}")
-  ACCESS_KEY=$(echo "${BASE64_ACCESS_KEY}" | base64 --decode)
-  SECRET_KEY=$(echo "${BASE64_SECRET_KEY}" | base64 --decode)
-  s3cmd --config=s3cfg --access_key="${ACCESS_KEY}" --secret_key="${SECRET_KEY}" --host="${CLUSTER_1_IP_ADDR}" mb s3://bkt
-  s3cmd --config=s3cfg --access_key="${ACCESS_KEY}" --secret_key="${SECRET_KEY}" --host="${CLUSTER_1_IP_ADDR}" put ./1M.dat s3://bkt
-  CLUSTER_2_IP_ADDR=$(kubectl -n rook-ceph-secondary get svc rook-ceph-rgw-zone-b-multisite-store -o jsonpath="{.spec.clusterIP}")
-  s3cmd --config=s3cfg --access_key="${ACCESS_KEY}" --secret_key="${SECRET_KEY}" --host="${CLUSTER_2_IP_ADDR}" get s3://bkt/1M.dat 1M-get.dat --force
-  diff 1M.dat 1M-get.dat
+  openssl req -new -key "${DIR}"/"${SERVICE}".key -subj "/CN=${SERVICE}.${NAMESPACE}.svc" -out "${DIR}"/server.csr -config "${DIR}"/csr.conf
+
+  export CSR_NAME=${SERVICE}-csr
+
+  cat <<EOF >"${DIR}"/csr.yaml
+apiVersion: certificates.k8s.io/v1beta1
+kind: CertificateSigningRequest
+metadata:
+  name: ${CSR_NAME}
+spec:
+  groups:
+  - system:authenticated
+  request: $(cat ${DIR}/server.csr | base64 | tr -d '\n')
+  usages:
+  - digital signature
+  - key encipherment
+  - server auth
+EOF
+
+  kubectl create -f "${DIR}/"csr.yaml
+
+  kubectl certificate approve ${CSR_NAME}
+
+  serverCert=$(kubectl get csr ${CSR_NAME} -o jsonpath='{.status.certificate}')
+  echo "${serverCert}" | openssl base64 -d -A -out "${DIR}"/"${SERVICE}".crt
+  kubectl config view --raw --minify --flatten -o jsonpath='{.clusters[].cluster.certificate-authority-data}' | base64 -d > "${DIR}"/"${SERVICE}".ca
 }
 
 selected_function="$1"
 if [ "$selected_function" = "generate_tls_config" ]; then
-  scriptdir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-  bash "${scriptdir}"/generate-tls-config.sh "$2" "$3" "$4" "$5"
+    $selected_function $2 $3 $4 $5
 elif [ "$selected_function" = "wait_for_ceph_to_be_ready" ]; then
-  $selected_function "$2" "$3"
-elif [ "$selected_function" = "wait_for_rgw_pods" ]; then
-  $selected_function "$2"
     $selected_function $2 $3
 elif [ "$selected_function" = "deploy_manifest_with_local_build" ]; then
     $selected_function $2

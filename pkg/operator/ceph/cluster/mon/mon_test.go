@@ -31,7 +31,6 @@ import (
 
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	clienttest "github.com/rook/rook/pkg/daemon/ceph/client/test"
@@ -89,12 +88,9 @@ func newTestStartClusterWithQuorumResponse(t *testing.T, namespace string, monRe
 			if strings.Contains(command, "ceph-authtool") {
 				err := clienttest.CreateConfigDir(path.Join(configDir, namespace))
 				return "", errors.Wrap(err, "failed testing of start cluster without quorum response")
+			} else {
+				return monResponse()
 			}
-			return "", nil
-		},
-		MockExecuteCommandWithOutputFile: func(command string, outFileArg string, args ...string) (string, error) {
-			// mock quorum health check because a second `Start()` triggers a health check
-			return monResponse()
 		},
 	}
 	return &clusterd.Context{
@@ -468,6 +464,63 @@ func TestMonFoundInQuorum(t *testing.T) {
 	assert.False(t, monFoundInQuorum("d", response))
 }
 
+func TestConfigureArbiter(t *testing.T) {
+	c := &Cluster{spec: cephv1.ClusterSpec{
+		Mon: cephv1.MonSpec{
+			StretchCluster: &cephv1.StretchClusterSpec{
+				Zones: []cephv1.StretchClusterZoneSpec{
+					{Name: "a", Arbiter: true},
+					{Name: "b"},
+					{Name: "c"},
+				},
+			},
+		},
+	}}
+	c.arbiterMon = "arb"
+	currentArbiter := c.arbiterMon
+	setNewTiebreaker := false
+	executor := &exectest.MockExecutor{
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
+			logger.Infof("%s %v", command, args)
+			if args[0] == "mon" {
+				if args[1] == "dump" {
+					return fmt.Sprintf(`{"tiebreaker_mon": "%s", "stretch_mode": true}`, currentArbiter), nil
+				}
+				if args[1] == "set_new_tiebreaker" {
+					assert.Equal(t, c.arbiterMon, args[2])
+					setNewTiebreaker = true
+					return "", nil
+				}
+			}
+			return "", fmt.Errorf("unrecognized output file command: %s %v", command, args)
+		},
+	}
+	c.context = &clusterd.Context{Clientset: test.New(t, 5), Executor: executor}
+	c.ClusterInfo = clienttest.CreateTestClusterInfo(5)
+
+	t.Run("no arbiter failover for old ceph version", func(t *testing.T) {
+		c.arbiterMon = "changed"
+		c.ClusterInfo.CephVersion = cephver.CephVersion{Major: 16, Minor: 2, Extra: 6}
+		err := c.ConfigureArbiter()
+		assert.NoError(t, err)
+		assert.False(t, setNewTiebreaker)
+	})
+	t.Run("stretch mode already configured - new", func(t *testing.T) {
+		c.arbiterMon = currentArbiter
+		c.ClusterInfo.CephVersion = cephver.CephVersion{Major: 16, Minor: 2, Extra: 7}
+		err := c.ConfigureArbiter()
+		assert.NoError(t, err)
+		assert.False(t, setNewTiebreaker)
+	})
+	t.Run("tiebreaker changed", func(t *testing.T) {
+		c.arbiterMon = "changed"
+		c.ClusterInfo.CephVersion = cephver.CephVersion{Major: 16, Minor: 2, Extra: 7}
+		err := c.ConfigureArbiter()
+		assert.NoError(t, err)
+		assert.True(t, setNewTiebreaker)
+	})
+}
+
 func TestFindAvailableZoneForStretchedMon(t *testing.T) {
 	c := &Cluster{spec: cephv1.ClusterSpec{
 		Mon: cephv1.MonSpec{
@@ -587,7 +640,7 @@ func TestStretchMonVolumeClaimTemplate(t *testing.T) {
 }
 
 func TestArbiterPlacement(t *testing.T) {
-	placement := rookv1.Placement{
+	placement := cephv1.Placement{
 		NodeAffinity: &v1.NodeAffinity{
 			RequiredDuringSchedulingIgnoredDuringExecution: &v1.NodeSelector{
 				NodeSelectorTerms: []v1.NodeSelectorTerm{
@@ -616,19 +669,19 @@ func TestArbiterPlacement(t *testing.T) {
 		},
 	}}
 
-	c.spec.Placement = rookv1.PlacementSpec{}
+	c.spec.Placement = cephv1.PlacementSpec{}
 	c.spec.Placement[cephv1.KeyMonArbiter] = placement
 
 	// No placement is found if not requesting the arbiter placement
 	result := c.getMonPlacement("c")
-	assert.Equal(t, rookv1.Placement{}, result)
+	assert.Equal(t, cephv1.Placement{}, result)
 
 	// Placement is found if requesting the arbiter
 	result = c.getMonPlacement("a")
 	assert.Equal(t, placement, result)
 
 	// Arbiter and all mons have the same placement if no arbiter placement is specified
-	c.spec.Placement = rookv1.PlacementSpec{}
+	c.spec.Placement = cephv1.PlacementSpec{}
 	c.spec.Placement[cephv1.KeyMon] = placement
 	result = c.getMonPlacement("a")
 	assert.Equal(t, placement, result)
@@ -655,9 +708,6 @@ func TestCheckIfArbiterReady(t *testing.T) {
 	balanced := true
 	executor := &exectest.MockExecutor{
 		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
-			return "", fmt.Errorf("unrecognized output command: %s %v", command, args)
-		},
-		MockExecuteCommandWithOutputFile: func(command string, outFileArg string, args ...string) (string, error) {
 			switch {
 			case args[0] == "osd" && args[1] == "crush" && args[2] == "dump":
 				crushBuckets := `

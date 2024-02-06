@@ -33,12 +33,11 @@ import (
 	"github.com/rook/rook/pkg/operator/ceph/cluster"
 	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/ceph/csi"
+	"github.com/rook/rook/pkg/operator/ceph/csi/peermap"
 	"github.com/rook/rook/pkg/operator/ceph/provisioner"
 	"github.com/rook/rook/pkg/operator/discover"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/sig-storage-lib-external-provisioner/v6/controller"
 )
@@ -60,6 +59,10 @@ var (
 
 	// ImmediateRetryResult Return this for a immediate retry of the reconciliation loop with the same request object.
 	ImmediateRetryResult = reconcile.Result{Requeue: true}
+
+	// Signals to watch for to terminate the operator gracefully
+	// Using os.Interrupt is more portable across platforms instead of os.SIGINT
+	shutdownSignals = []os.Signal{os.Interrupt, syscall.SIGTERM}
 )
 
 // Operator type for managing storage
@@ -126,8 +129,10 @@ func (o *Operator) Run() error {
 		return errors.Errorf("rook operator namespace is not provided. expose it via downward API in the rook operator manifest file using environment variable %q", k8sutil.PodNamespaceEnvVar)
 	}
 
-	// creating a context
-	stopContext, stopFunc := context.WithCancel(context.Background())
+	opcontroller.SetCephCommandsTimeout(o.context)
+
+	// Initialize signal handler and context
+	stopContext, stopFunc := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stopFunc()
 
 	rookDiscover := discover.New(o.context.Clientset)
@@ -151,10 +156,8 @@ func (o *Operator) Run() error {
 		return errors.Wrap(err, "failed to get server version")
 	}
 
-	// Initialize signal handler
-	signalChan := make(chan os.Signal, 1)
+	// Initialize stop channel for watchers
 	stopChan := make(chan struct{})
-	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
 
 	// For Flex Driver, run volume provisioner for each of the supported configurations
 	if opcontroller.FlexDriverEnabled(o.context) {
@@ -190,8 +193,8 @@ func (o *Operator) Run() error {
 	// Signal handler to stop the operator
 	for {
 		select {
-		case <-signalChan:
-			logger.Info("shutdown signal received, exiting...")
+		case <-stopContext.Done():
+			logger.Infof("shutdown signal received, exiting... %v", stopContext.Err())
 			o.cleanup(stopChan)
 			return nil
 		case err := <-mgrErrorChan:
@@ -248,7 +251,8 @@ func (o *Operator) updateDrivers() error {
 		return nil
 	}
 
-	ownerRef, err := getDeploymentOwnerReference(o.context.Clientset, o.operatorNamespace)
+	operatorPodName := os.Getenv(k8sutil.PodNameEnvVar)
+	ownerRef, err := k8sutil.GetDeploymentOwnerReference(o.context.Clientset, operatorPodName, o.operatorNamespace)
 	if err != nil {
 		logger.Warningf("could not find deployment owner reference to assign to csi drivers. %v", err)
 	}
@@ -265,35 +269,11 @@ func (o *Operator) updateDrivers() error {
 		return errors.Wrap(err, "failed creating csi config map")
 	}
 
+	err = peermap.CreateOrUpdateConfig(o.context, &peermap.PeerIDMappings{})
+	if err != nil {
+		return errors.Wrap(err, "failed to create pool ID mapping config map")
+	}
+
 	go csi.ValidateAndConfigureDrivers(o.context, o.operatorNamespace, o.rookImage, o.securityAccount, serverVersion, ownerInfo)
 	return nil
-}
-
-// getDeploymentOwnerReference returns an OwnerReference to the rook-ceph-operator deployment
-func getDeploymentOwnerReference(clientset kubernetes.Interface, namespace string) (*metav1.OwnerReference, error) {
-	ctx := context.TODO()
-	var deploymentRef *metav1.OwnerReference
-	podName := os.Getenv(k8sutil.PodNameEnvVar)
-	pod, err := clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
-	if err != nil {
-		return nil, errors.Wrapf(err, "could not find pod %q to find deployment owner reference", podName)
-	}
-	for _, podOwner := range pod.OwnerReferences {
-		if podOwner.Kind == "ReplicaSet" {
-			replicaset, err := clientset.AppsV1().ReplicaSets(namespace).Get(ctx, podOwner.Name, metav1.GetOptions{})
-			if err != nil {
-				return nil, errors.Wrapf(err, "could not find replicaset %q to find deployment owner reference", podOwner.Name)
-			}
-			for _, replicasetOwner := range replicaset.OwnerReferences {
-				if replicasetOwner.Kind == "Deployment" {
-					localreplicasetOwner := replicasetOwner
-					deploymentRef = &localreplicasetOwner
-				}
-			}
-		}
-	}
-	if deploymentRef == nil {
-		return nil, errors.New("could not find owner reference for rook-ceph deployment")
-	}
-	return deploymentRef, nil
 }

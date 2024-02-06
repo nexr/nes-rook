@@ -1,14 +1,4 @@
 pull_request_rules:
-  # auto label ceph PR based on title content
-  - name: auto ceph label pr storage backend
-    conditions:
-      - title~=^ceph
-      - base=master
-    actions:
-      label:
-        add:
-          - ceph
-
   # if there is a conflict in a backport PR, ping the author to send a proper backport PR
   - name: ping author on conflicts
     conditions:
@@ -136,9 +126,7 @@ pull_request_rules:
       - 'check-success=TestCephSmokeSuite (v1.20.2)'
       - 'check-success=TestCephHelmSuite (v1.15.12)'
       - 'check-success=TestCephHelmSuite (v1.20.2)'
-      - 'check-success=TestCephMultiClusterDeploySuite (v1.15.12)'
       - 'check-success=TestCephMultiClusterDeploySuite (v1.20.2)'
-      - 'check-success=TestCephUpgradeSuite (v1.15.12)'
       - 'check-success=TestCephUpgradeSuite (v1.20.2)'
     actions:
       merge:
@@ -152,7 +140,7 @@ pull_request_rules:
   - actions:
       backport:
         branches:
-        - release-1.3
+          - release-1.3
     conditions:
       - label=backport-release-1.3
     name: backport release-1.3
@@ -161,15 +149,25 @@ pull_request_rules:
   - actions:
       backport:
         branches:
-        - release-1.4
+          - release-1.4
     conditions:
       - label=backport-release-1.4
     name: backport release-1.4
+
   # release-1.5 branch
   - actions:
       backport:
         branches:
-        - release-1.5
+          - release-1.5
     conditions:
       - label=backport-release-1.5
     name: backport release-1.5
+
+  # release-1.6 branch
+  - actions:
+      backport:
+        branches:
+          - release-1.6
+    conditions:
+      - label=backport-release-1.6
+    name: backport release-1.6

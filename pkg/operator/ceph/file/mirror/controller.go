@@ -30,8 +30,8 @@ import (
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	opconfig "github.com/rook/rook/pkg/operator/ceph/config"
 	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
+	"github.com/rook/rook/pkg/operator/ceph/reporting"
 	"github.com/rook/rook/pkg/operator/k8sutil"
-
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -173,11 +173,11 @@ func (r *ReconcileFilesystemMirror) reconcile(request reconcile.Request) (reconc
 
 	// The CR was just created, initializing status fields
 	if filesystemMirror.Status == nil {
-		updateStatus(r.client, request.NamespacedName, k8sutil.Created)
+		updateStatus(r.client, request.NamespacedName, k8sutil.EmptyStatus)
 	}
 
 	// Make sure a CephCluster is present otherwise do nothing
-	cephCluster, isReadyToReconcile, _, reconcileResponse := opcontroller.IsReadyToReconcile(r.client, r.context, request.NamespacedName, controllerName)
+	cephCluster, isReadyToReconcile, _, reconcileResponse := opcontroller.IsReadyToReconcile(r.client, request.NamespacedName, controllerName)
 	if !isReadyToReconcile {
 		logger.Debugf("CephCluster resource not ready in namespace %q, retrying in %q.", request.NamespacedName.Namespace, reconcileResponse.RequeueAfter.String())
 		return reconcileResponse, nil
@@ -202,11 +202,12 @@ func (r *ReconcileFilesystemMirror) reconcile(request reconcile.Request) (reconc
 		}
 		return opcontroller.ImmediateRetryResult, errors.Wrapf(err, "failed to retrieve current ceph %q version", daemon)
 	}
+	r.clusterInfo.CephVersion = currentCephVersion
+
 	// Validate Ceph version
 	if !currentCephVersion.IsAtLeastPacific() {
 		return opcontroller.ImmediateRetryResult, errors.Errorf("ceph pacific version is required to deploy cephfs mirroring, current cluster runs %q", currentCephVersion.String())
 	}
-	r.clusterInfo.CephVersion = currentCephVersion
 
 	// CREATE/UPDATE
 	logger.Debug("reconciling ceph filesystem mirror deployments")
@@ -260,7 +261,7 @@ func updateStatus(client client.Client, name types.NamespacedName, status string
 	}
 
 	fsMirror.Status.Phase = status
-	if err := opcontroller.UpdateStatus(client, fsMirror); err != nil {
+	if err := reporting.UpdateStatus(client, fsMirror); err != nil {
 		logger.Errorf("failed to set filesystem mirror %q status to %q. %v", fsMirror.Name, status, err)
 		return
 	}

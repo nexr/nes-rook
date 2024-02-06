@@ -20,16 +20,16 @@ package config
 
 import (
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
+	"github.com/rook/rook/pkg/apis/rook.io"
 	v1 "k8s.io/api/core/v1"
 )
 
 type fn func(cephv1.CephClusterHealthCheckSpec) *v1.Probe
 
 // ConfigureLivenessProbe returns the desired liveness probe for a given daemon
-func ConfigureLivenessProbe(daemon rookv1.KeyType, container v1.Container, healthCheck cephv1.CephClusterHealthCheckSpec) v1.Container {
+func ConfigureLivenessProbe(daemon rook.KeyType, container v1.Container, healthCheck cephv1.CephClusterHealthCheckSpec) v1.Container {
 	// Map of functions
-	probeFnMap := map[rookv1.KeyType]fn{
+	probeFnMap := map[rook.KeyType]fn{
 		cephv1.KeyMon: cephv1.GetMonLivenessProbe,
 		cephv1.KeyMgr: cephv1.GetMgrLivenessProbe,
 		cephv1.KeyOSD: cephv1.GetOSDLivenessProbe,
@@ -44,7 +44,7 @@ func ConfigureLivenessProbe(daemon rookv1.KeyType, container v1.Container, healt
 			// If the spec value is not empty, let's apply it along with default when some fields are not specified
 			if probe != nil {
 				// Set the liveness probe on the container to overwrite the default probe created by Rook
-				container.LivenessProbe = GetLivenessProbeWithDefaults(probe, container.LivenessProbe)
+				container.LivenessProbe = GetProbeWithDefaults(probe, container.LivenessProbe)
 			}
 		}
 	}
@@ -52,7 +52,7 @@ func ConfigureLivenessProbe(daemon rookv1.KeyType, container v1.Container, healt
 	return container
 }
 
-func GetLivenessProbeWithDefaults(desiredProbe, currentProbe *v1.Probe) *v1.Probe {
+func GetProbeWithDefaults(desiredProbe, currentProbe *v1.Probe) *v1.Probe {
 	newProbe := *desiredProbe
 
 	// Do not replace the handler with the previous one!

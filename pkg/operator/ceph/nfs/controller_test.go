@@ -19,11 +19,11 @@ package nfs
 
 import (
 	"context"
-	"errors"
 	"os"
 	"testing"
 
 	"github.com/coreos/pkg/capnslog"
+	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	rookclient "github.com/rook/rook/pkg/client/clientset/versioned/fake"
 	"github.com/rook/rook/pkg/client/clientset/versioned/scheme"
@@ -51,25 +51,6 @@ var (
 			"ceph version 14.2.8 (3a54b2b6d167d4a2a19e003a705696d4fe619afc) nautilus (stable)": 3
 		}
 	}`
-	poolDetails = `{
-		"pool": "foo",
-		"pool_id": 1,
-		"size": 3,
-		"min_size": 2,
-		"pg_num": 8,
-		"pgp_num": 8,
-		"crush_rule": "replicated_rule",
-		"hashpspool": true,
-		"nodelete": false,
-		"nopgchange": false,
-		"nosizechange": false,
-		"write_fadvise_dontneed": false,
-		"noscrub": false,
-		"nodeep-scrub": false,
-		"use_gmt_hitset": true,
-		"fast_read": 0,
-		"pg_autoscale_mode": "on"
-	  }`
 )
 
 func TestCephNFSController(t *testing.T) {
@@ -107,7 +88,7 @@ func TestCephNFSController(t *testing.T) {
 	}
 
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			if args[0] == "status" {
 				return `{"fsid":"c47cac40-9bee-4d52-823b-ccd803ba5bfe","health":{"checks":{},"status":"HEALTH_ERR"},"pgmap":{"num_pgs":100,"pgs_by_state":[{"state_name":"active+clean","count":100}]}}`, nil
 			}
@@ -207,7 +188,7 @@ func TestCephNFSController(t *testing.T) {
 	cl = fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
 
 	executor = &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			if args[0] == "status" {
 				return `{"fsid":"c47cac40-9bee-4d52-823b-ccd803ba5bfe","health":{"checks":{},"status":"HEALTH_OK"},"pgmap":{"num_pgs":100,"pgs_by_state":[{"state_name":"active+clean","count":100}]}}`, nil
 			}
@@ -217,10 +198,16 @@ func TestCephNFSController(t *testing.T) {
 			if args[0] == "versions" {
 				return dummyVersionsRaw, nil
 			}
-			if args[0] == "osd" && args[1] == "pool" && args[2] == "get" {
-				return poolDetails, nil
+			if args[0] == "osd" && args[1] == "pool" && args[2] == "create" {
+				return "", nil
 			}
-			return "", errors.New("unknown command")
+			if args[0] == "osd" && args[1] == "crush" && args[2] == "rule" {
+				return "", nil
+			}
+			if args[0] == "osd" && args[1] == "pool" && args[2] == "application" {
+				return "", nil
+			}
+			return "", errors.Errorf("unknown command %q %v", command, args)
 		},
 		MockExecuteCommand: func(command string, args ...string) error {
 			if command == "rados" {

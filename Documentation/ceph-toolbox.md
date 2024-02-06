@@ -13,7 +13,7 @@ The toolbox can be run in two modes:
 1. [Interactive](#interactive-toolbox): Start a toolbox pod where you can connect and execute Ceph commands from a shell
 2. [One-time job](#toolbox-job): Run a script with Ceph commands and collect the results from the job log
 
-> Prerequisite: Before running the toolbox you should have a running Rook cluster deployed (see the [Quickstart Guide](ceph-quickstart.md)).
+> Prerequisite: Before running the toolbox you should have a running Rook cluster deployed (see the [Quickstart Guide](quickstart.md)).
 
 ## Interactive Toolbox
 
@@ -43,7 +43,7 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       containers:
       - name: rook-ceph-tools
-        image: rook/ceph:v1.6.11
+        image: rook/ceph:v1.7.11
         command: ["/tini"]
         args: ["-g", "--", "/usr/local/bin/toolbox.sh"]
         imagePullPolicy: IfNotPresent
@@ -133,7 +133,7 @@ spec:
     spec:
       initContainers:
       - name: config-init
-        image: rook/ceph:v1.6.11
+        image: rook/ceph:v1.7.11
         command: ["/usr/local/bin/toolbox.sh"]
         args: ["--skip-watch"]
         imagePullPolicy: IfNotPresent
@@ -155,7 +155,7 @@ spec:
           mountPath: /etc/rook
       containers:
       - name: script
-        image: rook/ceph:v1.6.11
+        image: rook/ceph:v1.7.11
         volumeMounts:
         - mountPath: /etc/ceph
           name: ceph-config

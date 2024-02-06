@@ -18,10 +18,16 @@ package object
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httputil"
 	"regexp"
+	"strings"
 
 	"github.com/ceph/go-ceph/rgw/admin"
+	"github.com/coreos/pkg/capnslog"
+	"github.com/google/go-cmp/cmp"
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
@@ -33,18 +39,59 @@ import (
 
 // Context holds the context for the object store.
 type Context struct {
-	Context               *clusterd.Context
-	clusterInfo           *cephclient.ClusterInfo
-	CephClusterSpec       cephv1.ClusterSpec
-	Name                  string
-	UID                   string
-	Endpoint              string
-	Realm                 string
-	ZoneGroup             string
-	Zone                  string
-	adminOpsUserAccessKey string
-	adminOpsUserSecretKey string
-	adminOpsClient        *admin.API
+	Context         *clusterd.Context
+	clusterInfo     *cephclient.ClusterInfo
+	CephClusterSpec cephv1.ClusterSpec
+	Name            string
+	UID             string
+	Endpoint        string
+	Realm           string
+	ZoneGroup       string
+	Zone            string
+}
+
+// AdminOpsContext holds the object store context as well as information for connecting to the admin
+// ops API.
+type AdminOpsContext struct {
+	Context
+	TlsCert               []byte
+	AdminOpsUserAccessKey string
+	AdminOpsUserSecretKey string
+	AdminOpsClient        *admin.API
+}
+
+type debugHTTPClient struct {
+	client admin.HTTPClient
+	logger *capnslog.PackageLogger
+}
+
+// NewDebugHTTPClient helps us mutating the HTTP client to debug the request/response
+func NewDebugHTTPClient(client admin.HTTPClient, logger *capnslog.PackageLogger) *debugHTTPClient {
+	return &debugHTTPClient{client, logger}
+}
+
+func (c *debugHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	dump, err := httputil.DumpRequestOut(req, true)
+	if err != nil {
+		return nil, err
+	}
+	// this can leak credentials for making requests
+	c.logger.Tracef("\n%s\n", string(dump))
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	dump, err = httputil.DumpResponse(resp, true)
+	if err != nil {
+		return nil, err
+	}
+	// this can leak any sensitive info like credentials in the response
+	c.logger.Tracef("\n%s\n", string(dump))
+
+	return resp, nil
 }
 
 const (
@@ -66,10 +113,18 @@ func NewContext(context *clusterd.Context, clusterInfo *cephclient.ClusterInfo, 
 }
 
 func NewMultisiteContext(context *clusterd.Context, clusterInfo *cephclient.ClusterInfo, store *cephv1.CephObjectStore) (*Context, error) {
-	objContext := &Context{Context: context, Name: store.Name, clusterInfo: clusterInfo}
-	realmName, zoneGroupName, zoneName, err := getMultisiteForObjectStore(context, store)
+	nsName := fmt.Sprintf("%s/%s", store.Namespace, store.Name)
+
+	objContext := NewContext(context, clusterInfo, store.Name)
+	objContext.UID = string(store.UID)
+
+	if err := UpdateEndpoint(objContext, &store.Spec); err != nil {
+		return nil, err
+	}
+
+	realmName, zoneGroupName, zoneName, err := getMultisiteForObjectStore(context, &store.Spec, store.Namespace, store.Name)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to get realm/zone group/zone for object store %q", store.Name)
+		return nil, errors.Wrapf(err, "failed to get realm/zone group/zone for object store %q", nsName)
 	}
 
 	objContext.Realm = realmName
@@ -78,15 +133,78 @@ func NewMultisiteContext(context *clusterd.Context, clusterInfo *cephclient.Clus
 	return objContext, nil
 }
 
+// UpdateEndpoint updates an object.Context using the latest info from the CephObjectStore spec
+func UpdateEndpoint(objContext *Context, spec *cephv1.ObjectStoreSpec) error {
+	nsName := fmt.Sprintf("%s/%s", objContext.clusterInfo.Namespace, objContext.Name)
+
+	port, err := spec.GetPort()
+	if err != nil {
+		return errors.Wrapf(err, "failed to get port for object store %q", nsName)
+	}
+	objContext.Endpoint = BuildDNSEndpoint(BuildDomainName(objContext.Name, objContext.clusterInfo.Namespace), port, spec.IsTLSEnabled())
+
+	return nil
+}
+
+func NewMultisiteAdminOpsContext(
+	objContext *Context,
+	spec *cephv1.ObjectStoreSpec,
+) (*AdminOpsContext, error) {
+	accessKey, secretKey, err := GetAdminOPSUserCredentials(objContext, spec)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to create or retrieve rgw admin ops user")
+	}
+
+	httpClient, tlsCert, err := genObjectStoreHTTPClientFunc(objContext, spec)
+	if err != nil {
+		return nil, err
+	}
+
+	// If DEBUG level is set we will mutate the HTTP client for printing request and response
+	var client *admin.API
+	if logger.LevelAt(capnslog.DEBUG) {
+		client, err = admin.New(objContext.Endpoint, accessKey, secretKey, NewDebugHTTPClient(httpClient, logger))
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to build admin ops API connection")
+		}
+	} else {
+		client, err = admin.New(objContext.Endpoint, accessKey, secretKey, httpClient)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to build admin ops API connection")
+		}
+	}
+
+	return &AdminOpsContext{
+		Context:               *objContext,
+		TlsCert:               tlsCert,
+		AdminOpsUserAccessKey: accessKey,
+		AdminOpsUserSecretKey: secretKey,
+		AdminOpsClient:        client,
+	}, nil
+}
+
 func extractJSON(output string) (string, error) {
 	// `radosgw-admin` sometimes leaves logs to stderr even if it succeeds.
 	// So we should skip them if parsing output as json.
-	pattern := regexp.MustCompile(`(?ms)^{.*}$`)
-	match := pattern.Find([]byte(output))
-	if match == nil {
+	// valid JSON can be an object (in braces) or an array (in brackets)
+	arrayRegex := regexp.MustCompile(`(?ms)^\[.*\]$`)
+	arrayMatch := arrayRegex.Find([]byte(output))
+	objRegex := regexp.MustCompile(`(?ms)^{.*}$`)
+	objMatch := objRegex.Find([]byte(output))
+	if arrayMatch == nil && objMatch == nil {
 		return "", errors.Errorf("didn't contain json. %s", output)
 	}
-	return string(match), nil
+	if arrayMatch == nil && objMatch != nil {
+		return string(objMatch), nil
+	}
+	if arrayMatch != nil && objMatch == nil {
+		return string(arrayMatch), nil
+	}
+	// if both object and array match, take the largest of the two matches
+	if len(arrayMatch) > len(objMatch) {
+		return string(arrayMatch), nil
+	}
+	return string(objMatch), nil
 }
 
 // RunAdminCommandNoMultisite is for running radosgw-admin commands in scenarios where an object-store has not been created yet or for commands on the realm or zonegroup (ex: radosgw-admin zonegroup get)
@@ -101,7 +219,7 @@ func RunAdminCommandNoMultisite(c *Context, expectJSON bool, args ...string) (st
 		output, stderr, err = c.Context.RemoteExecutor.ExecCommandInContainerWithFullOutputWithTimeout(cephclient.ProxyAppLabel, cephclient.CommandProxyInitContainerName, c.clusterInfo.Namespace, append([]string{"radosgw-admin"}, args...)...)
 	} else {
 		command, args := cephclient.FinalizeCephCommandArgs("radosgw-admin", c.clusterInfo, args, c.Context.ConfigDir)
-		output, err = c.Context.Executor.ExecuteCommandWithTimeout(exec.CephCommandTimeout, command, args...)
+		output, err = c.Context.Executor.ExecuteCommandWithTimeout(exec.CephCommandsTimeout, command, args...)
 	}
 
 	if err != nil {
@@ -179,11 +297,128 @@ func isInvalidFlagError(err error) bool {
 	return exitCode == 22
 }
 
-func GetAdminOPSUserCredentials(ctx *clusterd.Context, clusterInfo *cephclient.ClusterInfo, objContext *Context, cephObjectStore *cephv1.CephObjectStore) (string, string, error) {
-	if cephObjectStore.Spec.IsExternal() {
+// CommitConfigChanges commits changes to RGW configs for realm/zonegroup/zone changes idempotently.
+// Under the hood, this updates the RGW config period and commits the change if changes are detected.
+func CommitConfigChanges(c *Context) error {
+	currentPeriod, err := runAdminCommand(c, true, "period", "get")
+	if err != nil {
+		return errorOrIsNotFound(err, "failed to get the current RGW configuration period to see if it needs changed")
+	}
+
+	// this stages the current config changees and returns what the new period config will look like
+	// without committing the changes
+	stagedPeriod, err := runAdminCommand(c, true, "period", "update")
+	if err != nil {
+		return errorOrIsNotFound(err, "failed to stage the current RGW configuration period")
+	}
+
+	shouldCommit, err := periodWillChange(currentPeriod, stagedPeriod)
+	if err != nil {
+		return errors.Wrap(err, "failed to determine if the staged RGW configuration period is different from current")
+	}
+
+	// DO NOT MODIFY nsName here. It is part of the integration test checks noted below.
+	nsName := fmt.Sprintf("%s/%s", c.clusterInfo.Namespace, c.Name)
+	if !shouldCommit {
+		// DO NOT MODIFY THE MESSAGE BELOW. It is checked in integration tests.
+		logger.Infof("there are no changes to commit for RGW configuration period for CephObjectStore %q", nsName)
+		return nil
+	}
+	// DO NOT MODIFY THE MESSAGE BELOW. It is checked in integration tests.
+	logger.Infof("committing changes to RGW configuration period for CephObjectStore %q", nsName)
+	// don't expect json output since we don't intend to use the output from the command
+	_, err = runAdminCommand(c, false, "period", "update", "--commit")
+	if err != nil {
+		return errorOrIsNotFound(err, "failed to commit RGW configuration period changes")
+	}
+
+	return nil
+}
+
+// return true if the configuration period will change if the staged period is committed
+func periodWillChange(current, staged string) (bool, error) {
+	// Rook wants to check if there are any differences in the current period versus the period that
+	// is staged to be applied/committed. If there are differences, then Rook should "commit" the
+	// staged period changes to instruct RGWs to update their runtime configuration.
+	//
+	// For many RGW interactions, Rook often creates a typed struct to unmarshal RGW JSON output
+	// into. In those cases Rook is able to opt in to only a small subset of specific fields it
+	// needs. This keeps the coupling between Rook and RGW JSON output as loose as possible while
+	// still being specific enough for Rook to operate.
+	//
+	// For this implementation, we could use a strongly-typed struct here to unmarshal into, and we
+	// could use DisallowUnknownFields() to cause an error if the RGW JSON output changes to flag
+	// when the existing implementation might be invalidated. This relies on an extremely tight
+	// coupling between Rook and the JSON output from RGW. The failure mode of this implementation
+	// is to return an error from the reconcile when there are unmarshalling errors, which results
+	// in CephObjectStores that could not be updated if a version of Ceph changes the RGW output.
+	//
+	// In the chosen implementation, we unmarshal into "dumb" data structures that create a loose
+	// coupling. With these, we must ignore the fields that we have observed to change between the
+	// current and staged periods when we should *not* commit an un-changed period. The failure mode
+	// of this implementation is that if the RGW output changes its structure, Rook may detect
+	// differences where there are none. This would result in Rook committing the period more often
+	// than necessary. Committing the period results in a short period of downtime while RGWs reload
+	// their configuration, but we opt for this inconvenience in lieu of blocking reconciliation.
+	//
+	// For any implementation, if the RGW changes the behavior of its output but not the structure,
+	// Rook could commit unnecessary period changes or fail to commit necessary period changes
+	// depending on how the RGW output has changed. Rook cannot detect this class of failures, and
+	// the behavior cannot be specifically known.
+	var currentJSON map[string]interface{}
+	var stagedJSON map[string]interface{}
+	var err error
+
+	err = json.Unmarshal([]byte(current), &currentJSON)
+	if err != nil {
+		return true, errors.Wrap(err, "failed to unmarshal current RGW configuration period")
+	}
+	err = json.Unmarshal([]byte(staged), &stagedJSON)
+	if err != nil {
+		return true, errors.Wrap(err, "failed to unmarshal staged RGW configuration period")
+	}
+
+	// There are some values in the periods that we don't care to diff because they are always
+	// different in the staged period, even when no updates are needed. Sometimes, the values are
+	// reported as different in the staging output but aren't actually changed upon commit.
+	ignorePaths := cmp.FilterPath(func(path cmp.Path) bool {
+		// path.String() outputs nothing for the crude map[string]interface{} JSON struct
+		// Example of path.GoString() output for a long path in the period JSON:
+		// root["period_map"].(map[string]interface {})["short_zone_ids"].([]interface {})[0].(map[string]interface {})["val"].(float64)
+		switch path.GoString() {
+		case `root["id"]`:
+			// "id" is always changed in the staged period, but it doesn't always update.
+			return true
+		case `root["predecessor_uuid"]`:
+			// "predecessor_uuid" is always changed in the staged period, but it doesn't always update.
+			return true
+		case `root["realm_epoch"]`:
+			// "realm_epoch" is always incremented in the staged period, but it doesn't always increment.
+			return true
+		case `root["epoch"]`:
+			// Strangely, "epoch" is not incremented in the staged period even though it is always
+			// incremented upon an actual commit. It could be argued that this behavior is a bug.
+			// Ignore this value to handle the possibility that the behavior changes in the future.
+			return true
+		default:
+			return false
+		}
+	}, cmp.Ignore())
+
+	diff := cmp.Diff(currentJSON, stagedJSON, ignorePaths)
+	diff = strings.TrimSpace(diff)
+	logger.Debugf("RGW config period diff:\n%s", diff)
+
+	return (diff != ""), nil
+}
+
+func GetAdminOPSUserCredentials(objContext *Context, spec *cephv1.ObjectStoreSpec) (string, string, error) {
+	ns := objContext.clusterInfo.Namespace
+
+	if spec.IsExternal() {
 		// Fetch the secret for admin ops user
 		s := &v1.Secret{}
-		err := ctx.Client.Get(context.TODO(), types.NamespacedName{Name: RGWAdminOpsUserSecretName, Namespace: cephObjectStore.Namespace}, s)
+		err := objContext.Context.Client.Get(context.TODO(), types.NamespacedName{Name: RGWAdminOpsUserSecretName, Namespace: ns}, s)
 		if err != nil {
 			return "", "", err
 		}
@@ -207,16 +442,16 @@ func GetAdminOPSUserCredentials(ctx *clusterd.Context, clusterInfo *cephclient.C
 		DisplayName:  &rgwAdminOpsUserDisplayName,
 		AdminOpsUser: true,
 	}
-	logger.Debugf("creating s3 user object %q for object store %q", userConfig.UserID, cephObjectStore.Namespace)
+	logger.Debugf("creating s3 user object %q for object store %q", userConfig.UserID, ns)
 	user, rgwerr, err := CreateUser(objContext, userConfig)
 	if err != nil {
 		if rgwerr == ErrorCodeFileExists {
 			user, _, err = GetUser(objContext, userConfig.UserID)
 			if err != nil {
-				return "", "", errors.Wrapf(err, "failed to get details from ceph object user %q for object store %q", userConfig.UserID, cephObjectStore.Name)
+				return "", "", errors.Wrapf(err, "failed to get details from ceph object user %q for object store %q", userConfig.UserID, objContext.Name)
 			}
 		} else {
-			return "", "", errors.Wrapf(err, "failed to create object user %q. error code %d for object store %q", userConfig.UserID, rgwerr, cephObjectStore.Name)
+			return "", "", errors.Wrapf(err, "failed to create object user %q. error code %d for object store %q", userConfig.UserID, rgwerr, objContext.Name)
 		}
 	}
 	return *user.AccessKey, *user.SecretKey, nil

@@ -109,6 +109,7 @@ build.version:
 build.common: build.version helm.build mod.check
 	@$(MAKE) go.init
 	@$(MAKE) go.validate
+	@$(MAKE) -C images/ceph list-image
 
 do.build.platform.%:
 	@$(MAKE) PLATFORM=$* go.build
@@ -171,7 +172,7 @@ csv-ceph: csv-clean crds ## Generate a CSV file for OLM.
 	$(MAKE) -C images/ceph csv
 
 csv-clean: ## Remove existing OLM files.
-	$(MAKE) -C images/ceph csv-clean
+	@$(MAKE) -C images/ceph csv-clean
 
 crds: $(CONTROLLER_GEN) $(YQ)
 	@echo Updating CRD manifests

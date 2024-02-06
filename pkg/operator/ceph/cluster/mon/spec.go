@@ -212,8 +212,8 @@ func (c *Cluster) makeMonPod(monConfig *monConfig, canary bool) (*corev1.Pod, er
 
 	if c.spec.Network.IsHost() {
 		pod.Spec.DNSPolicy = corev1.DNSClusterFirstWithHostNet
-	} else if c.spec.Network.NetworkSpec.IsMultus() {
-		if err := k8sutil.ApplyMultus(c.spec.Network.NetworkSpec, &pod.ObjectMeta); err != nil {
+	} else if c.spec.Network.IsMultus() {
+		if err := k8sutil.ApplyMultus(c.spec.Network, &pod.ObjectMeta); err != nil {
 			return nil, err
 		}
 	}
@@ -317,6 +317,15 @@ func (c *Cluster) makeMonDaemonContainer(monConfig *monConfig) corev1.Container 
 		WorkingDir:    config.VarLogCephDir,
 	}
 
+	if monConfig.Zone != "" {
+		desiredLocation := fmt.Sprintf("%s=%s", c.stretchFailureDomainName(), monConfig.Zone)
+		container.Args = append(container.Args, []string{"--set-crush-location", desiredLocation}...)
+		if monConfig.Zone == c.getArbiterZone() {
+			// remember the arbiter mon to be set later in the reconcile after the OSDs are configured
+			c.arbiterMon = monConfig.DaemonName
+		}
+	}
+
 	// If the liveness probe is enabled
 	container = config.ConfigureLivenessProbe(cephv1.KeyMon, container, c.spec.HealthCheck)
 
@@ -361,7 +370,7 @@ func UpdateCephDeploymentAndWait(context *clusterd.Context, clusterInfo *client.
 			err := client.OkToContinue(context, clusterInfo, deployment.Name, daemonType, daemonName)
 			if err != nil {
 				if continueUpgradeAfterChecksEvenIfNotHealthy {
-					logger.Infof("The %s daemon %s is not ok-to-stop but 'continueUpgradeAfterChecksEvenIfNotHealthy' is true, so continuing...", daemonType, daemonName)
+					logger.Infof("The %s daemon %s is not ok-to-continue but 'continueUpgradeAfterChecksEvenIfNotHealthy' is true, so continuing...", daemonType, daemonName)
 					return nil
 				}
 				return errors.Wrapf(err, "failed to check if we can %s the deployment %s", action, deployment.Name)

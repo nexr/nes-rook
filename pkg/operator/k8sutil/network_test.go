@@ -20,7 +20,7 @@ import (
 	"testing"
 
 	netapi "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
+	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -69,7 +69,7 @@ func TestApplyMultus(t *testing.T) {
 		}
 		for _, test := range tests {
 			t.Run(test.name, func(t *testing.T) {
-				net := rookv1.NetworkSpec{
+				net := cephv1.NetworkSpec{
 					Provider:  "multus",
 					Selectors: test.netSelectors,
 				}
@@ -87,7 +87,7 @@ func TestApplyMultus(t *testing.T) {
 		json2 := `{"name": "macvlan", "interface": "net2"}`
 
 		t.Run("no applicable networks for non-osd pod", func(t *testing.T) {
-			net := rookv1.NetworkSpec{
+			net := cephv1.NetworkSpec{
 				Provider: "multus",
 				Selectors: map[string]string{
 					"server": json1,
@@ -102,7 +102,7 @@ func TestApplyMultus(t *testing.T) {
 		})
 
 		t.Run("for a non-osd pod", func(t *testing.T) {
-			net := rookv1.NetworkSpec{
+			net := cephv1.NetworkSpec{
 				Provider: "multus",
 				Selectors: map[string]string{
 					"public":  json1,
@@ -117,7 +117,7 @@ func TestApplyMultus(t *testing.T) {
 		})
 
 		t.Run("for an osd pod", func(t *testing.T) {
-			net := rookv1.NetworkSpec{
+			net := cephv1.NetworkSpec{
 				Provider: "multus",
 				Selectors: map[string]string{
 					"server": json1,
@@ -135,7 +135,7 @@ func TestApplyMultus(t *testing.T) {
 		})
 
 		t.Run("for an osd pod (reverse ordering)", func(t *testing.T) {
-			net := rookv1.NetworkSpec{
+			net := cephv1.NetworkSpec{
 				Provider: "multus",
 				Selectors: map[string]string{
 					"server": json2,
@@ -155,7 +155,7 @@ func TestApplyMultus(t *testing.T) {
 	})
 
 	t.Run("mixed format (error)", func(t *testing.T) {
-		net := rookv1.NetworkSpec{
+		net := cephv1.NetworkSpec{
 			Provider: "multus",
 			Selectors: map[string]string{
 				"server": `{"name": "macvlan", "interface": "net1"}`,

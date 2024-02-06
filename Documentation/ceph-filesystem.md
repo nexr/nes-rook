@@ -13,7 +13,7 @@ This example runs a shared filesystem for the [kube-registry](https://github.com
 
 ## Prerequisites
 
-This guide assumes you have created a Rook cluster as explained in the main [Kubernetes guide](ceph-quickstart.md)
+This guide assumes you have created a Rook cluster as explained in the main [Kubernetes guide](quickstart.md)
 
 ### Multiple Filesystems Support
 
@@ -91,7 +91,8 @@ metadata:
 # Change "rook-ceph" provisioner prefix to match the operator namespace if needed
 provisioner: rook-ceph.cephfs.csi.ceph.com
 parameters:
-  # clusterID is the namespace where operator is deployed.
+  # clusterID is the namespace where the rook cluster is running
+  # If you change this namespace, also change the namespace below where the secret namespaces are defined
   clusterID: rook-ceph
 
   # CephFS filesystem name into which the volume shall be created
@@ -122,25 +123,6 @@ Create the storage class.
 
 ```console
 kubectl create -f cluster/examples/kubernetes/ceph/csi/cephfs/storageclass.yaml
-```
-
-## Mirroring
-
-Since Ceph Pacific, CephFS supports asynchronous replication of snapshots to a remote CephFS file system via cephfs-mirror tool. Snapshots are synchronized by mirroring snapshot data followed by creating a snapshot with the same name (for a given directory on the remote file system) as the snapshot being synchronized.
-It is generally useful when planning for Disaster Recovery.
-For clusters that are geographically distributed and stretching is not possible due to high latencies.
-
-```yaml
-apiVersion: ceph.rook.io/v1
-kind: CephFilesystem
-metadata:
-  name: myfs
-  namespace: rook-ceph
-spec:
-...
-...
-  mirroring:
-    enabled: true
 ```
 
 ## Quotas

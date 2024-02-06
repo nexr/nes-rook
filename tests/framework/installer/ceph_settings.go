@@ -18,45 +18,38 @@ package installer
 
 import (
 	"fmt"
-	"io/ioutil"
-	"net/http"
 	"os"
-	"path"
-	"regexp"
 	"strings"
-	"time"
 
-	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	"github.com/rook/rook/tests/framework/utils"
 )
 
 // TestCephSettings struct for handling panic and test suite tear down
 type TestCephSettings struct {
-	DataDirHostPath           string
-	ClusterName               string
-	Namespace                 string
-	OperatorNamespace         string
-	StorageClassName          string
-	UseHelm                   bool
-	UsePVC                    bool
-	Mons                      int
-	UseCrashPruner            bool
-	MultipleMgrs              bool
-	SkipOSDCreation           bool
-	UseCSI                    bool
-	EnableDiscovery           bool
-	EnableAdmissionController bool
-	IsExternal                bool
-	SkipClusterCleanup        bool
-	SkipCleanupPolicy         bool
-	DirectMountToolbox        bool
-	EnableVolumeReplication   bool
-	RookVersion               string
-	CephVersion               cephv1.CephVersionSpec
+	DataDirHostPath             string
+	ClusterName                 string
+	Namespace                   string
+	OperatorNamespace           string
+	StorageClassName            string
+	UseHelm                     bool
+	RetainHelmDefaultStorageCRs bool
+	UsePVC                      bool
+	Mons                        int
+	UseCrashPruner              bool
+	MultipleMgrs                bool
+	SkipOSDCreation             bool
+	UseCSI                      bool
+	EnableDiscovery             bool
+	EnableAdmissionController   bool
+	IsExternal                  bool
+	SkipClusterCleanup          bool
+	SkipCleanupPolicy           bool
+	DirectMountToolbox          bool
+	EnableVolumeReplication     bool
+	ChangeHostName              bool
+	RookVersion                 string
+	CephVersion                 cephv1.CephVersionSpec
 }
-
-var imageMatch = regexp.MustCompile(`image: rook\/ceph:[a-z0-9.-]+`)
 
 func (s *TestCephSettings) ApplyEnvVars() {
 	// skip the cleanup by default
@@ -71,19 +64,8 @@ func (s *TestCephSettings) ApplyEnvVars() {
 }
 
 func (s *TestCephSettings) readManifest(filename string) string {
-	rootDir, err := utils.FindRookRoot()
-	if err != nil {
-		panic(err)
-	}
-	manifest := path.Join(rootDir, "cluster/examples/kubernetes/ceph", filename)
-	logger.Infof("Reading manifest: %s", manifest)
-	contents, err := ioutil.ReadFile(manifest)
-	if err != nil {
-		panic(errors.Wrapf(err, "failed to read manifest at %s", manifest))
-	}
-	taggedManifest := imageMatch.ReplaceAllString(string(contents), "image: rook/ceph:"+LocalBuildTag)
-	return replaceNamespaces(manifest, taggedManifest, s.OperatorNamespace, s.Namespace)
-
+	manifest := readManifest("ceph", filename)
+	return replaceNamespaces(manifest, manifest, s.OperatorNamespace, s.Namespace)
 }
 
 func (s *TestCephSettings) readManifestFromGithub(filename string) string {
@@ -91,30 +73,8 @@ func (s *TestCephSettings) readManifestFromGithub(filename string) string {
 }
 
 func (s *TestCephSettings) readManifestFromGithubWithClusterNamespace(filename, clusterNamespace string) string {
-	url := fmt.Sprintf("https://raw.githubusercontent.com/rook/rook/%s/cluster/examples/kubernetes/ceph/%s", s.RookVersion, filename)
-	logger.Infof("Retrieving manifest: %s", url)
-	var response *http.Response
-	var err error
-	for i := 1; i <= 3; i++ {
-		// #nosec G107 This is only test code and is expected to read from a url
-		response, err = http.Get(url)
-		if err != nil {
-			if i == 3 {
-				panic(errors.Wrapf(err, "failed to read manifest from %s", url))
-			}
-			logger.Warningf("failed to read manifest from %s. retrying in 1sec. %v", url, err)
-			time.Sleep(time.Second)
-			continue
-		}
-		break
-	}
-	defer response.Body.Close()
-
-	content, err := ioutil.ReadAll(response.Body)
-	if err != nil {
-		panic(errors.Wrapf(err, "failed to read content from %s", url))
-	}
-	return replaceNamespaces(url, string(content), s.OperatorNamespace, clusterNamespace)
+	manifest := readManifestFromGithub(s.RookVersion, "ceph", filename)
+	return replaceNamespaces(filename, manifest, s.OperatorNamespace, clusterNamespace)
 }
 
 func (s *TestCephSettings) replaceOperatorSettings(manifest string) string {

@@ -22,6 +22,7 @@ storage cluster.
 * [OSD Dedicated Network](#osd-dedicated-network)
 * [Phantom OSD Removal](#phantom-osd-removal)
 * [Change Failure Domain](#change-failure-domain)
+* [Auto Expansion of OSDs](#auto-expansion-of-OSDs)
 
 ## Prerequisites
 
@@ -78,14 +79,14 @@ When you create the second CephCluster CR, use the same `NAMESPACE` and the oper
 
 ## Use custom Ceph user and secret for mounting
 
-> **NOTE**: For extensive info about creating Ceph users, consult the Ceph documentation: http://docs.ceph.com/docs/mimic/rados/operations/user-management/#add-a-user.
+> **NOTE**: For extensive info about creating Ceph users, consult the Ceph documentation: https://docs.ceph.com/en/latest/rados/operations/user-management/#add-a-user.
 
 Using a custom Ceph user and secret can be done for filesystem and block storage.
 
-Create a custom user in Ceph with read-write access in the `/bar` directory on CephFS (For Ceph Mimic or newer, use `data=POOL_NAME` instead of `pool=POOL_NAME`):
+Create a custom user in Ceph with read-write access in the `/bar` directory on CephFS:
 
 ```console
-$ ceph auth get-or-create-key client.user1 mon 'allow r' osd 'allow rw tag cephfs pool=YOUR_FS_DATA_POOL' mds 'allow r, allow rw path=/bar'
+$ ceph auth get-or-create-key client.user1 mon 'allow r' osd 'allow rw tag cephfs data=YOUR_FS_DATA_POOL' mds 'allow r, allow rw path=/bar'
 ```
 
 The command will return a Ceph secret key, this key should be added as a secret in Kubernetes like this:
@@ -109,7 +110,7 @@ mountSecret: ceph-user1-secret
 
 If you want the Rook Ceph agent to require a `mountUser` and `mountSecret` to be set in StorageClasses using Rook, you must set the environment variable `AGENT_MOUNT_SECURITY_MODE` to `Restricted` on the Rook Ceph operator Deployment.
 
-For more information on using the Ceph feature to limit access to CephFS paths, see [Ceph Documentation - Path Restriction](http://docs.ceph.com/docs/mimic/cephfs/client-auth/#path-restriction).
+For more information on using the Ceph feature to limit access to CephFS paths, see [Ceph Documentation - Path Restriction](https://docs.ceph.com/en/latest/cephfs/client-auth/#path-restriction).
 
 ### ClusterRole
 
@@ -590,3 +591,39 @@ ceph osd pool get replicapool crush_rule
 If the cluster's health was `HEALTH_OK` when we performed this change, immediately, the new rule is applied to the cluster transparently without service disruption.
 
 Exactly the same approach can be used to change from `host` back to `osd`.
+
+## Auto Expansion of OSDs
+
+### Prerequisites
+
+1) A [PVC-based cluster](ceph-cluster-crd.md#pvc-based-cluster) deployed in dynamic provisioning environment with a `storageClassDeviceSet`.
+
+2) Create the Rook [Toolbox](ceph-toolbox.md).
+
+>Note: [Prometheus Operator](ceph-monitoring.md#prometheus-operator) and [Prometheus Instances](ceph-monitoring.md#prometheus-instances) are Prerequisites that are created by the auto-grow-storage script.
+
+### To scale OSDs Vertically
+
+Run the following script to auto-grow the size of OSDs on a PVC-based Rook-Ceph cluster whenever the OSDs have reached the storage near-full threshold.
+```console
+tests/scripts/auto-grow-storage.sh size  --max maxSize --growth-rate percent 
+```
+>growth-rate percentage represents the percent increase you want in the OSD capacity and maxSize represent the maximum disk size.
+
+For example, if you need to increase the size of OSD by 30% and max disk size is 1Ti
+```console
+./auto-grow-storage.sh size  --max 1Ti --growth-rate 30 
+```
+
+### To scale OSDs Horizontally
+
+Run the following script to auto-grow the number of OSDs on a PVC-based Rook-Ceph cluster whenever the OSDs have reached the storage near-full threshold.
+```console
+tests/scripts/auto-grow-storage.sh count --max maxCount --count rate
+```
+>Count of OSD represents the number of OSDs you need to add and maxCount represents the number of disks a storage cluster will support.
+
+For example, if you need to increase the number of OSDs by 3 and maxCount is 10
+```console
+./auto-grow-storage.sh count --max 10 --count 3
+```

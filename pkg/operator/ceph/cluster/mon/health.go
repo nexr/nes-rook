@@ -19,13 +19,16 @@ package mon
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/pkg/errors"
+	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	cephutil "github.com/rook/rook/pkg/daemon/ceph/util"
 	"github.com/rook/rook/pkg/operator/ceph/controller"
+	"github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -42,6 +45,8 @@ var (
 	timeZero                       = time.Duration(0)
 	// Check whether mons are on the same node once per operator restart since it's a rare scheduling condition
 	needToCheckMonsOnSameNode = true
+	// Version of Ceph where the arbiter failover is supported
+	arbiterFailoverSupportedCephVersion = version.CephVersion{Major: 16, Minor: 2, Extra: 7}
 )
 
 // HealthChecker aggregates the mon/cluster info needed to check the health of the monitors
@@ -51,24 +56,50 @@ type HealthChecker struct {
 }
 
 func updateMonTimeout(monCluster *Cluster) {
-	monCRDTimeoutSetting := monCluster.spec.HealthCheck.DaemonHealth.Monitor.Timeout
-	if monCRDTimeoutSetting != "" {
-		if monTimeout, err := time.ParseDuration(monCRDTimeoutSetting); err == nil {
-			if monTimeout == timeZero {
-				logger.Warning("monitor failover is disabled")
+	// If the env was passed by the operator config, use that value
+	// This is an old behavior where we maintain backward compatibility
+	monTimeoutEnv := os.Getenv("ROOK_MON_OUT_TIMEOUT")
+	if monTimeoutEnv != "" {
+		parsedInterval, err := time.ParseDuration(monTimeoutEnv)
+		// We ignore the error here since the default is 10min and it's unlikely to be a problem
+		if err == nil {
+			MonOutTimeout = parsedInterval
+		}
+		// No env var, let's use the CR value if any
+	} else {
+		monCRDTimeoutSetting := monCluster.spec.HealthCheck.DaemonHealth.Monitor.Timeout
+		if monCRDTimeoutSetting != "" {
+			if monTimeout, err := time.ParseDuration(monCRDTimeoutSetting); err == nil {
+				if monTimeout == timeZero {
+					logger.Warning("monitor failover is disabled")
+				}
+				MonOutTimeout = monTimeout
 			}
-			MonOutTimeout = monTimeout
 		}
 	}
+	// A third case is when the CRD is not set, in which case we use the default from MonOutTimeout
 }
 
 func updateMonInterval(monCluster *Cluster, h *HealthChecker) {
-	checkInterval := monCluster.spec.HealthCheck.DaemonHealth.Monitor.Interval
-	// allow overriding the check interval
-	if checkInterval != nil {
-		logger.Debugf("ceph mon status in namespace %q check interval %q", monCluster.Namespace, checkInterval.Duration.String())
-		h.interval = checkInterval.Duration
+	// If the env was passed by the operator config, use that value
+	// This is an old behavior where we maintain backward compatibility
+	healthCheckIntervalEnv := os.Getenv("ROOK_MON_HEALTHCHECK_INTERVAL")
+	if healthCheckIntervalEnv != "" {
+		parsedInterval, err := time.ParseDuration(healthCheckIntervalEnv)
+		// We ignore the error here since the default is 45s and it's unlikely to be a problem
+		if err == nil {
+			h.interval = parsedInterval
+		}
+		// No env var, let's use the CR value if any
+	} else {
+		checkInterval := monCluster.spec.HealthCheck.DaemonHealth.Monitor.Interval
+		// allow overriding the check interval
+		if checkInterval != nil {
+			logger.Debugf("ceph mon status in namespace %q check interval %q", monCluster.Namespace, checkInterval.Duration.String())
+			h.interval = checkInterval.Duration
+		}
 	}
+	// A third case is when the CRD is not set, in which case we use the default from HealthCheckInterval
 }
 
 // NewHealthChecker creates a new HealthChecker object
@@ -294,32 +325,47 @@ func (c *Cluster) failMon(monCount, desiredMonCount int, name string) bool {
 		if err := c.removeMon(name); err != nil {
 			logger.Errorf("failed to remove mon %q. %v", name, err)
 		}
-	} else {
-		if c.spec.IsStretchCluster() && name == c.arbiterMon {
-			// Ceph does not currently support updating the arbiter mon
-			// or else the mons in the two datacenters will not be aware anymore
-			// of the arbiter mon. Thus, disabling failover until the arbiter
-			// mon can be updated in ceph.
-			logger.Warningf("refusing to failover arbiter mon %q on a stretched cluster", name)
-			return false
-		}
+		return true
+	}
 
-		// prevent any voluntary mon drain while failing over
-		if err := c.blockMonDrain(types.NamespacedName{Name: monPDBName, Namespace: c.Namespace}); err != nil {
-			logger.Errorf("failed to block mon drain. %v", err)
-		}
+	if err := c.allowFailover(name); err != nil {
+		logger.Warningf("aborting mon %q failover. %v", name, err)
+		return false
+	}
 
-		// bring up a new mon to replace the unhealthy mon
-		if err := c.failoverMon(name); err != nil {
-			logger.Errorf("failed to failover mon %q. %v", name, err)
-		}
+	// prevent any voluntary mon drain while failing over
+	if err := c.blockMonDrain(types.NamespacedName{Name: monPDBName, Namespace: c.Namespace}); err != nil {
+		logger.Errorf("failed to block mon drain. %v", err)
+	}
 
-		// allow any voluntary mon drain after failover
-		if err := c.allowMonDrain(types.NamespacedName{Name: monPDBName, Namespace: c.Namespace}); err != nil {
-			logger.Errorf("failed to allow mon drain. %v", err)
-		}
+	// bring up a new mon to replace the unhealthy mon
+	if err := c.failoverMon(name); err != nil {
+		logger.Errorf("failed to failover mon %q. %v", name, err)
+	}
+
+	// allow any voluntary mon drain after failover
+	if err := c.allowMonDrain(types.NamespacedName{Name: monPDBName, Namespace: c.Namespace}); err != nil {
+		logger.Errorf("failed to allow mon drain. %v", err)
 	}
 	return true
+}
+
+func (c *Cluster) allowFailover(name string) error {
+	if !c.spec.IsStretchCluster() {
+		// always failover if not a stretch cluster
+		return nil
+	}
+	if name != c.arbiterMon {
+		// failover if it's a non-arbiter
+		return nil
+	}
+	if c.ClusterInfo.CephVersion.IsAtLeast(arbiterFailoverSupportedCephVersion) {
+		// failover the arbiter if at least v16.2.7
+		return nil
+	}
+
+	// Ceph does not support updating the arbiter mon in older versions
+	return errors.Errorf("refusing to failover arbiter mon %q on a stretched cluster until upgrading to ceph version %s", name, arbiterFailoverSupportedCephVersion.String())
 }
 
 func (c *Cluster) removeOrphanMonResources() {
@@ -409,6 +455,7 @@ func (c *Cluster) failoverMon(name string) error {
 
 	// remove the failed mon from a local list of the existing mons for finding a stretch zone
 	existingMons := c.clusterInfoToMonConfig(name)
+
 	zone, err := c.findAvailableZoneIfStretched(existingMons)
 	if err != nil {
 		return errors.Wrap(err, "failed to find available stretch zone")
@@ -448,18 +495,9 @@ func (c *Cluster) failoverMon(name string) error {
 
 	// Assign to a zone if a stretch cluster
 	if c.spec.IsStretchCluster() {
-		updateArbiter := false
-		if name == c.arbiterMon {
-			updateArbiter = true
-		}
-		if err := c.assignStretchMonsToZones([]*monConfig{m}); err != nil {
-			return errors.Wrap(err, "failed to assign mons to zones")
-		}
-		if updateArbiter {
-			// Update the arbiter mon for the stretch cluster if it changed
-			if err := c.ConfigureArbiter(); err != nil {
-				return errors.Wrap(err, "failed to configure stretch arbiter")
-			}
+		// Update the arbiter mon for the stretch cluster if it changed
+		if err := c.ConfigureArbiter(); err != nil {
+			return errors.Wrap(err, "failed to configure stretch arbiter")
 		}
 	}
 
@@ -519,6 +557,12 @@ func (c *Cluster) removeMon(daemonName string) error {
 		return errors.Wrapf(err, "failed to save mon config after failing over mon %s", daemonName)
 	}
 
+	// Update cluster-wide RBD bootstrap peer token since Monitors have changed
+	_, err := controller.CreateBootstrapPeerSecret(c.context, c.ClusterInfo, &cephv1.CephCluster{ObjectMeta: metav1.ObjectMeta{Name: c.ClusterInfo.NamespacedName().Name, Namespace: c.Namespace}}, c.ownerInfo)
+	if err != nil {
+		return errors.Wrap(err, "failed to update cluster rbd bootstrap peer token")
+	}
+
 	return nil
 }
 
@@ -570,10 +614,6 @@ func (c *Cluster) addOrRemoveExternalMonitor(status cephclient.MonStatusResponse
 	logger.Debugf("ClusterInfo is now Empty, refilling it from status.MonMap.Mons")
 
 	monCount := len(status.MonMap.Mons)
-	if monCount%2 == 0 {
-		logger.Warningf("external cluster mon count is even (%d), should be uneven, continuing.", monCount)
-	}
-
 	if monCount == 1 {
 		logger.Warning("external cluster mon count is 1, consider adding new monitors.")
 	}

@@ -21,7 +21,6 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"strconv"
 	"syscall"
@@ -29,8 +28,10 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
+	"github.com/rook/rook/pkg/operator/ceph/config"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/k8sutil"
+	"github.com/rook/rook/pkg/util"
 	"github.com/rook/rook/pkg/util/exec"
 	v1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -111,17 +112,19 @@ func (c *Cluster) configureDashboardModules() error {
 }
 
 func (c *Cluster) configureDashboardModuleSettings(daemonID string) (bool, error) {
+	monStore := config.GetMonStore(c.context, c.clusterInfo)
+
 	daemonID = fmt.Sprintf("mgr.%s", daemonID)
 
 	// url prefix
-	hasChanged, err := client.SetConfig(c.context, c.clusterInfo, daemonID, "mgr/dashboard/url_prefix", c.spec.Dashboard.URLPrefix, false)
+	hasChanged, err := monStore.SetIfChanged(daemonID, "mgr/dashboard/url_prefix", c.spec.Dashboard.URLPrefix)
 	if err != nil {
 		return false, err
 	}
 
 	// ssl support
 	ssl := strconv.FormatBool(c.spec.Dashboard.SSL)
-	changed, err := client.SetConfig(c.context, c.clusterInfo, daemonID, "mgr/dashboard/ssl", ssl, false)
+	changed, err := monStore.SetIfChanged(daemonID, "mgr/dashboard/ssl", ssl)
 	if err != nil {
 		return false, err
 	}
@@ -129,7 +132,7 @@ func (c *Cluster) configureDashboardModuleSettings(daemonID string) (bool, error
 
 	// server port
 	port := strconv.Itoa(c.dashboardPort())
-	changed, err = client.SetConfig(c.context, c.clusterInfo, daemonID, "mgr/dashboard/server_port", port, false)
+	changed, err = monStore.SetIfChanged(daemonID, "mgr/dashboard/server_port", port)
 	if err != nil {
 		return false, err
 	}
@@ -137,7 +140,7 @@ func (c *Cluster) configureDashboardModuleSettings(daemonID string) (bool, error
 
 	// SSL enabled. Needed to set specifically the ssl port setting
 	if c.spec.Dashboard.SSL {
-		changed, err = client.SetConfig(c.context, c.clusterInfo, daemonID, "mgr/dashboard/ssl_server_port", port, false)
+		changed, err = monStore.SetIfChanged(daemonID, "mgr/dashboard/ssl_server_port", port)
 		if err != nil {
 			return false, err
 		}
@@ -174,12 +177,12 @@ func (c *Cluster) initializeSecureDashboard() (bool, error) {
 }
 
 func (c *Cluster) createSelfSignedCert() (bool, error) {
-	// create a self-signed cert for the https connections required in mimic
+	// create a self-signed cert for the https connections
 	args := []string{"dashboard", "create-self-signed-cert"}
 
 	// retry a few times in the case that the mgr module is not ready to accept commands
 	for i := 0; i < 5; i++ {
-		_, err := client.NewCephCommand(c.context, c.clusterInfo, args).RunWithTimeout(exec.CephCommandTimeout)
+		_, err := client.NewCephCommand(c.context, c.clusterInfo, args).RunWithTimeout(exec.CephCommandsTimeout)
 		if err == context.DeadlineExceeded {
 			logger.Warning("cert creation timed out. trying again")
 			continue
@@ -214,21 +217,6 @@ func FileBasedPasswordSupported(c *client.ClusterInfo) bool {
 	return false
 }
 
-func CreateTempPasswordFile(password string) (*os.File, error) {
-	// Generate a temp file
-	file, err := ioutil.TempFile("", "")
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to generate temp file")
-	}
-
-	// Write password into file
-	err = ioutil.WriteFile(file.Name(), []byte(password), 0440)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to write dashboard password into file")
-	}
-	return file, nil
-}
-
 func (c *Cluster) setLoginCredentials(password string) error {
 	// Set the login credentials. Write the command/args to the debug log so we don't write the password by default to the log.
 	logger.Infof("setting ceph dashboard %q login creds", dashboardUsername)
@@ -237,7 +225,7 @@ func (c *Cluster) setLoginCredentials(password string) error {
 	// for latest Ceph versions
 	if FileBasedPasswordSupported(c.clusterInfo) {
 		// Generate a temp file
-		file, err := CreateTempPasswordFile(password)
+		file, err := util.CreateTempFile(password)
 		if err != nil {
 			return errors.Wrap(err, "failed to create a temporary dashboard password file")
 		}
@@ -253,7 +241,7 @@ func (c *Cluster) setLoginCredentials(password string) error {
 	}
 
 	_, err := client.ExecuteCephCommandWithRetry(func() (string, []byte, error) {
-		output, err := client.NewCephCommand(c.context, c.clusterInfo, args).RunWithTimeout(exec.CephCommandTimeout)
+		output, err := client.NewCephCommand(c.context, c.clusterInfo, args).RunWithTimeout(exec.CephCommandsTimeout)
 		return "set dashboard creds", output, err
 	}, c.exitCode, 5, invalidArgErrorCode, dashboardInitWaitTime)
 	if err != nil {

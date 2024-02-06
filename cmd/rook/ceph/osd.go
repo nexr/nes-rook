@@ -19,6 +19,7 @@ package ceph
 import (
 	"encoding/json"
 	"os"
+	"strconv"
 	"strings"
 
 	"k8s.io/client-go/kubernetes"
@@ -70,6 +71,8 @@ var (
 	blockPath               string
 	lvBackedPV              bool
 	osdIDsToRemove          string
+	preservePVC             string
+	forceOSDRemoval         string
 )
 
 func addOSDFlags(command *cobra.Command) {
@@ -91,13 +94,15 @@ func addOSDFlags(command *cobra.Command) {
 	// flags for running osds that were provisioned by ceph-volume
 	osdStartCmd.Flags().StringVar(&osdStringID, "osd-id", "", "the osd ID")
 	osdStartCmd.Flags().StringVar(&osdUUID, "osd-uuid", "", "the osd UUID")
-	osdStartCmd.Flags().StringVar(&osdStoreType, "osd-store-type", "", "whether the osd is bluestore or filestore")
+	osdStartCmd.Flags().StringVar(&osdStoreType, "osd-store-type", "", "the osd store type such as bluestore")
 	osdStartCmd.Flags().BoolVar(&pvcBackedOSD, "pvc-backed-osd", false, "Whether the OSD backing store in PVC or not")
 	osdStartCmd.Flags().StringVar(&blockPath, "block-path", "", "Block path for the OSD created by ceph-volume")
 	osdStartCmd.Flags().BoolVar(&lvBackedPV, "lv-backed-pv", false, "Whether the PV located on LV")
 
 	// flags for removing OSDs that are unhealthy or otherwise should be purged from the cluster
 	osdRemoveCmd.Flags().StringVar(&osdIDsToRemove, "osd-ids", "", "OSD IDs to remove from the cluster")
+	osdRemoveCmd.Flags().StringVar(&preservePVC, "preserve-pvc", "false", "Whether PVCs for OSDs will be deleted")
+	osdRemoveCmd.Flags().StringVar(&forceOSDRemoval, "force-osd-removal", "false", "Whether to force remove the OSD")
 
 	// add the subcommands to the parent osd command
 	osdCmd.AddCommand(osdConfigCmd,
@@ -236,7 +241,7 @@ func prepareOSD(cmd *cobra.Command, args []string) error {
 			Message:      err.Error(),
 			PvcBackedOSD: cfg.pvcBacked,
 		}
-		oposd.UpdateNodeStatus(kv, cfg.nodeName, status)
+		oposd.UpdateNodeOrPVCStatus(kv, cfg.nodeName, status)
 
 		rook.TerminateFatal(err)
 	}
@@ -259,11 +264,29 @@ func removeOSDs(cmd *cobra.Command, args []string) error {
 
 	context := createContext()
 
+	// We use strings instead of bool since the flag package has issues with parsing bools, or
+	// perhaps it's the translation between YAML and code... It's unclear but see:
+	// starting Rook v1.7.0-alpha.0.660.gb13faecc8 with arguments '/usr/local/bin/rook ceph osd remove --preserve-pvc false --force-osd-removal false --osd-ids 1'
+	// flag values: --force-osd-removal=true, --help=false, --log-level=DEBUG, --operator-image=,
+	// --osd-ids=1, --preserve-pvc=true, --service-account=
+	//
+	// Bools are false but they are interpreted true by the flag package.
+
+	forceOSDRemovalBool, err := strconv.ParseBool(forceOSDRemoval)
+	if err != nil {
+		return errors.Wrapf(err, "failed to parse --force-osd-removal flag")
+	}
+	preservePVCBool, err := strconv.ParseBool(preservePVC)
+	if err != nil {
+		return errors.Wrapf(err, "failed to parse --preserve-pvc flag")
+	}
+
 	// Run OSD remove sequence
-	err := osddaemon.RemoveOSDs(context, &clusterInfo, strings.Split(osdIDsToRemove, ","))
+	err = osddaemon.RemoveOSDs(context, &clusterInfo, strings.Split(osdIDsToRemove, ","), preservePVCBool, forceOSDRemovalBool)
 	if err != nil {
 		rook.TerminateFatal(err)
 	}
+
 	return nil
 }
 

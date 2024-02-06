@@ -28,7 +28,9 @@ import (
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
+	"github.com/rook/rook/pkg/operator/ceph/config"
 	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
+	"github.com/rook/rook/pkg/operator/ceph/reporting"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	v1 "k8s.io/api/core/v1"
@@ -157,7 +159,8 @@ func (c *cephStatusChecker) configureHealthSettings(status cephclient.CephStatus
 	if _, ok := status.Health.Checks["AUTH_INSECURE_GLOBAL_ID_RECLAIM_ALLOWED"]; ok {
 		if _, ok := status.Health.Checks["AUTH_INSECURE_GLOBAL_ID_RECLAIM"]; !ok {
 			logger.Info("Disabling the insecure global ID as no legacy clients are currently connected. If you still require the insecure connections, see the CVE to suppress the health warning and re-enable the insecure connections. https://docs.ceph.com/en/latest/security/CVE-2021-20288/")
-			if _, err := cephclient.SetConfig(c.context, c.clusterInfo, "mon", "auth_allow_insecure_global_id_reclaim", "false", false); err != nil {
+			monStore := config.GetMonStore(c.context, c.clusterInfo)
+			if err := monStore.Set("mon", "auth_allow_insecure_global_id_reclaim", "false"); err != nil {
 				logger.Warningf("failed to disable the insecure global ID. %v", err)
 			} else {
 				logger.Info("insecure global ID is now disabled")
@@ -169,7 +172,7 @@ func (c *cephStatusChecker) configureHealthSettings(status cephclient.CephStatus
 }
 
 // updateStatus updates an object with a given status
-func (c *cephStatusChecker) updateCephStatus(status *cephclient.CephStatus, condition cephv1.ConditionType, reason cephv1.ClusterReasonType, message string, conditionStatus v1.ConditionStatus) {
+func (c *cephStatusChecker) updateCephStatus(status *cephclient.CephStatus, condition cephv1.ConditionType, reason cephv1.ConditionReason, message string, conditionStatus v1.ConditionStatus) {
 	clusterName := c.clusterInfo.NamespacedName()
 	cephCluster, err := c.context.RookClientset.CephV1().CephClusters(clusterName.Namespace).Get(context.TODO(), clusterName.Name, metav1.GetOptions{})
 	if err != nil {
@@ -258,7 +261,7 @@ func (c *ClusterController) updateClusterCephVersion(image string, cephVersion c
 	// update the Ceph version on the retrieved cluster object
 	// do not overwrite the ceph status that is updated in a separate goroutine
 	cephCluster.Status.CephVersion = cephClusterVersion
-	if err := opcontroller.UpdateStatus(c.client, cephCluster); err != nil {
+	if err := reporting.UpdateStatus(c.client, cephCluster); err != nil {
 		logger.Errorf("failed to update cluster %q version. %v", c.namespacedName.Name, err)
 		return
 	}

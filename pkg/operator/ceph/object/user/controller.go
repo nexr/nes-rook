@@ -20,12 +20,12 @@ package objectuser
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"reflect"
 
 	"github.com/ceph/go-ceph/rgw/admin"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
+	"github.com/rook/rook/pkg/operator/ceph/reporting"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -53,6 +53,9 @@ const (
 	controllerName = "ceph-object-store-user-controller"
 )
 
+// newMultisiteAdminOpsCtxFunc help us mocking the admin ops API client in unit test
+var newMultisiteAdminOpsCtxFunc = object.NewMultisiteAdminOpsContext
+
 var logger = capnslog.NewPackageLogger("github.com/rook/rook", controllerName)
 
 var cephObjectStoreUserKind = reflect.TypeOf(cephv1.CephObjectStoreUser{}).Name()
@@ -68,11 +71,10 @@ type ReconcileObjectStoreUser struct {
 	client          client.Client
 	scheme          *runtime.Scheme
 	context         *clusterd.Context
-	objContext      *object.Context
+	objContext      *object.AdminOpsContext
 	userConfig      *admin.User
 	cephClusterSpec *cephv1.ClusterSpec
 	clusterInfo     *cephclient.ClusterInfo
-	adminOpsAPI     *admin.API
 }
 
 // Add creates a new CephObjectStoreUser Controller and adds it to the Manager. The Manager will set fields on the Controller
@@ -157,11 +159,11 @@ func (r *ReconcileObjectStoreUser) reconcile(request reconcile.Request) (reconci
 
 	// The CR was just created, initializing status fields
 	if cephObjectStoreUser.Status == nil {
-		updateStatus(r.client, request.NamespacedName, k8sutil.Created)
+		updateStatus(r.client, request.NamespacedName, k8sutil.EmptyStatus)
 	}
 
 	// Make sure a CephCluster is present otherwise do nothing
-	cephCluster, isReadyToReconcile, cephClusterExists, reconcileResponse := opcontroller.IsReadyToReconcile(r.client, r.context, request.NamespacedName, controllerName)
+	cephCluster, isReadyToReconcile, cephClusterExists, reconcileResponse := opcontroller.IsReadyToReconcile(r.client, request.NamespacedName, controllerName)
 	if !isReadyToReconcile {
 		// This handles the case where the Ceph Cluster is gone and we want to delete that CR
 		// We skip the deleteUser() function since everything is gone already
@@ -274,10 +276,10 @@ func (r *ReconcileObjectStoreUser) createorUpdateCephUser(u *cephv1.CephObjectSt
 	logCreateOrUpdate := fmt.Sprintf("retrieved existing ceph object user %q", u.Name)
 	var user admin.User
 	var err error
-	user, err = r.adminOpsAPI.GetUser(context.TODO(), *r.userConfig)
+	user, err = r.objContext.AdminOpsClient.GetUser(context.TODO(), *r.userConfig)
 	if err != nil {
 		if errors.Is(err, admin.ErrNoSuchUser) {
-			user, err = r.adminOpsAPI.CreateUser(context.TODO(), *r.userConfig)
+			user, err = r.objContext.AdminOpsClient.CreateUser(context.TODO(), *r.userConfig)
 			if err != nil {
 				return errors.Wrapf(err, "failed to create ceph object user %v", &r.userConfig.ID)
 			}
@@ -285,13 +287,44 @@ func (r *ReconcileObjectStoreUser) createorUpdateCephUser(u *cephv1.CephObjectSt
 		} else {
 			return errors.Wrapf(err, "failed to get details from ceph object user %q", u.Name)
 		}
+	} else if *user.MaxBuckets != *r.userConfig.MaxBuckets {
+		// TODO: handle update for user capabilities, depends on https://github.com/ceph/go-ceph/pull/571
+		user, err = r.objContext.AdminOpsClient.ModifyUser(context.TODO(), *r.userConfig)
+		if err != nil {
+			return errors.Wrapf(err, "failed to create ceph object user %v", &r.userConfig.ID)
+		}
+		logCreateOrUpdate = fmt.Sprintf("updated ceph object user %q", u.Name)
+	}
+
+	var quotaEnabled = false
+	var maxSize int64 = -1
+	var maxObjects int64 = -1
+	if u.Spec.Quotas != nil {
+		if u.Spec.Quotas.MaxObjects != nil {
+			maxObjects = *u.Spec.Quotas.MaxObjects
+			quotaEnabled = true
+		}
+		if u.Spec.Quotas.MaxSize != nil {
+			maxSize = u.Spec.Quotas.MaxSize.Value()
+			quotaEnabled = true
+		}
+	}
+	userQuota := admin.QuotaSpec{
+		UID:        u.Name,
+		Enabled:    &quotaEnabled,
+		MaxSize:    &maxSize,
+		MaxObjects: &maxObjects,
+	}
+	err = r.objContext.AdminOpsClient.SetUserQuota(context.TODO(), userQuota)
+	if err != nil {
+		return errors.Wrapf(err, "failed to set quotas for user %q", u.Name)
 	}
 
 	// Set access and secret key
 	r.userConfig.Keys[0].AccessKey = user.Keys[0].AccessKey
 	r.userConfig.Keys[0].SecretKey = user.Keys[0].SecretKey
-
 	logger.Info(logCreateOrUpdate)
+
 	return nil
 }
 
@@ -315,48 +348,11 @@ func (r *ReconcileObjectStoreUser) initializeObjectStoreContext(u *cephv1.CephOb
 	// Otherwise GetAdminOPSUserCredentials() will fail detecting the network provider when running RunAdminCommandNoMultisite()
 	objContext.CephClusterSpec = *r.cephClusterSpec
 
-	r.objContext = objContext
-	if store.Status == nil {
-		return errors.New("failed to initialize ceph object user because unknown object store status")
-	}
-
-	if _, ok := store.Status.Info["endpoint"]; ok {
-		r.objContext.Endpoint = store.Status.Info["endpoint"]
-	} else {
-		return errors.New("endpoint is missing in the status Info")
-	}
-
-	if _, ok := store.Status.Info["secureEndpoint"]; ok {
-		r.objContext.Endpoint = store.Status.Info["secureEndpoint"]
-	}
-
-	// Fetch admin Ops API user credentials
-	var accessKey, secretKey string
-	accessKey, secretKey, err = object.GetAdminOPSUserCredentials(r.context, r.clusterInfo, objContext, store)
-	if err != nil {
-		return errors.Wrap(err, "failed to fetch rgw admin ops api user credentials")
-	}
-
-	// Build TLS client if needed
-	httpClient := &http.Client{
-		Timeout: object.HttpTimeOut,
-	}
-	if store.Spec.IsTLSEnabled() {
-		tlsCert, err := object.GetTlsCaCert(objContext, &store.Spec)
-		if err != nil {
-			return errors.Wrapf(err, "failed to fetch CA cert to establish TLS connection with the object store %q", store.Name)
-		}
-		httpClient.Transport = object.BuildTransportTLS(tlsCert)
-	}
-
-	adminOpsAPI, err := admin.New(r.objContext.Endpoint, accessKey, secretKey, httpClient)
+	opsContext, err := newMultisiteAdminOpsCtxFunc(objContext, &store.Spec)
 	if err != nil {
 		return errors.Wrap(err, "failed to initialized rgw admin ops client api")
 	}
-	if logger.LevelAt(capnslog.DEBUG) {
-		adminOpsAPI.Debug = true
-	}
-	r.adminOpsAPI = adminOpsAPI
+	r.objContext = opsContext
 
 	return nil
 }
@@ -373,6 +369,30 @@ func generateUserConfig(user *cephv1.CephObjectStoreUser) admin.User {
 		ID:          user.Name,
 		DisplayName: displayName,
 		Keys:        make([]admin.UserKeySpec, 1),
+	}
+
+	defaultMaxBuckets := 1000
+	userConfig.MaxBuckets = &defaultMaxBuckets
+	if user.Spec.Quotas != nil && user.Spec.Quotas.MaxBuckets != nil {
+		userConfig.MaxBuckets = user.Spec.Quotas.MaxBuckets
+	}
+
+	if user.Spec.Capabilities != nil {
+		if user.Spec.Capabilities.User != "" {
+			userConfig.UserCaps += fmt.Sprintf("users=%s;", user.Spec.Capabilities.User)
+		}
+		if user.Spec.Capabilities.Bucket != "" {
+			userConfig.UserCaps += fmt.Sprintf("buckets=%s;", user.Spec.Capabilities.Bucket)
+		}
+		if user.Spec.Capabilities.MetaData != "" {
+			userConfig.UserCaps += fmt.Sprintf("metadata=%s;", user.Spec.Capabilities.MetaData)
+		}
+		if user.Spec.Capabilities.Usage != "" {
+			userConfig.UserCaps += fmt.Sprintf("usage=%s;", user.Spec.Capabilities.Usage)
+		}
+		if user.Spec.Capabilities.Zone != "" {
+			userConfig.UserCaps += fmt.Sprintf("zone=%s;", user.Spec.Capabilities.Zone)
+		}
 	}
 
 	return userConfig
@@ -504,7 +524,7 @@ func (r *ReconcileObjectStoreUser) getRgwPodList(cephObjectStoreUser *cephv1.Cep
 
 // Delete the user
 func (r *ReconcileObjectStoreUser) deleteUser(u *cephv1.CephObjectStoreUser) error {
-	err := r.adminOpsAPI.RemoveUser(context.TODO(), admin.User{ID: u.Name})
+	err := r.objContext.AdminOpsClient.RemoveUser(context.TODO(), admin.User{ID: u.Name})
 	if err != nil {
 		if errors.Is(err, admin.ErrNoSuchUser) {
 			logger.Warningf("user %q does not exist, nothing to remove", u.Name)
@@ -556,7 +576,7 @@ func updateStatus(client client.Client, name types.NamespacedName, status string
 	if user.Status.Phase == k8sutil.ReadyStatus {
 		user.Status.Info = generateStatusInfo(user)
 	}
-	if err := opcontroller.UpdateStatus(client, user); err != nil {
+	if err := reporting.UpdateStatus(client, user); err != nil {
 		logger.Errorf("failed to set object store user %q status to %q. %v", name, status, err)
 		return
 	}

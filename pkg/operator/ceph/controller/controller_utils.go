@@ -21,12 +21,14 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/operator/k8sutil"
+	"github.com/rook/rook/pkg/util/exec"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -81,6 +83,17 @@ func DiscoveryDaemonEnabled(context *clusterd.Context) bool {
 	return value == "true"
 }
 
+// SetCephCommandsTimeout sets the timeout value of Ceph commands which are executed from Rook
+func SetCephCommandsTimeout(context *clusterd.Context) {
+	strTimeoutSeconds, _ := k8sutil.GetOperatorSetting(context.Clientset, OperatorSettingConfigMapName, "ROOK_CEPH_COMMANDS_TIMEOUT_SECONDS", "15")
+	timeoutSeconds, err := strconv.Atoi(strTimeoutSeconds)
+	if err != nil || timeoutSeconds < 1 {
+		logger.Warningf("ROOK_CEPH_COMMANDS_TIMEOUT is %q but it should be >= 1, set the default value 15", strTimeoutSeconds)
+		timeoutSeconds = 15
+	}
+	exec.CephCommandsTimeout = time.Duration(timeoutSeconds) * time.Second
+}
+
 // CheckForCancelledOrchestration checks whether a cancellation has been requested
 func CheckForCancelledOrchestration(context *clusterd.Context) error {
 	defer context.RequestCancelOrchestration.UnSet()
@@ -113,7 +126,7 @@ func canIgnoreHealthErrStatusInReconcile(cephCluster cephv1.CephCluster, control
 }
 
 // IsReadyToReconcile determines if a controller is ready to reconcile or not
-func IsReadyToReconcile(c client.Client, clustercontext *clusterd.Context, namespacedName types.NamespacedName, controllerName string) (cephv1.CephCluster, bool, bool, reconcile.Result) {
+func IsReadyToReconcile(c client.Client, namespacedName types.NamespacedName, controllerName string) (cephv1.CephCluster, bool, bool, reconcile.Result) {
 	cephClusterExists := false
 
 	// Running ceph commands won't work and the controller will keep re-queuing so I believe it's fine not to check
@@ -129,9 +142,15 @@ func IsReadyToReconcile(c client.Client, clustercontext *clusterd.Context, names
 		logger.Debugf("%q: no CephCluster resource found in namespace %q", controllerName, namespacedName.Namespace)
 		return cephCluster, false, cephClusterExists, WaitForRequeueIfCephClusterNotReady
 	}
-	cephClusterExists = true
 	cephCluster = clusterList.Items[0]
 
+	// If the cluster has a cleanup policy to destroy the cluster and it has been marked for deletion, treat it as if it does not exist
+	if cephCluster.Spec.CleanupPolicy.HasDataDirCleanPolicy() && !cephCluster.DeletionTimestamp.IsZero() {
+		logger.Infof("%q: CephCluster %q has a destructive cleanup policy, allowing resources to be deleted", controllerName, namespacedName)
+		return cephCluster, false, cephClusterExists, WaitForRequeueIfCephClusterNotReady
+	}
+
+	cephClusterExists = true
 	logger.Debugf("%q: CephCluster resource %q found in namespace %q", controllerName, cephCluster.Name, namespacedName.Namespace)
 
 	// read the CR status of the cluster

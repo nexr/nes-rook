@@ -21,7 +21,7 @@ import (
 	"testing"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
+	"github.com/rook/rook/pkg/apis/rook.io"
 	"github.com/rook/rook/pkg/clusterd"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/osd/config"
@@ -43,7 +43,7 @@ func TestPodContainer(t *testing.T) {
 	cluster.clusterInfo.OwnerInfo = cephclient.NewMinimumOwnerInfo(t)
 	osdProps := osdProperties{
 		crushHostname: "node",
-		devices:       []rookv1.Device{},
+		devices:       []cephv1.Device{},
 		resources:     v1.ResourceRequirements{},
 		storeConfig:   config.StoreConfig{},
 		schedulerName: "custom-scheduler",
@@ -82,7 +82,7 @@ func TestDaemonset(t *testing.T) {
 }
 
 func testPodDevices(t *testing.T, dataDir, deviceName string, allDevices bool) {
-	devices := []rookv1.Device{
+	devices := []cephv1.Device{
 		{Name: deviceName},
 	}
 
@@ -95,15 +95,15 @@ func testPodDevices(t *testing.T, dataDir, deviceName string, allDevices bool) {
 	clusterInfo.OwnerInfo = cephclient.NewMinimumOwnerInfo(t)
 	context := &clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook", Executor: &exectest.MockExecutor{}}
 	spec := cephv1.ClusterSpec{
-		CephVersion: cephv1.CephVersionSpec{Image: "ceph/ceph:v15"},
-		Storage: rookv1.StorageScopeSpec{
-			Selection: rookv1.Selection{UseAllDevices: &allDevices, DeviceFilter: deviceName},
-			Nodes:     []rookv1.Node{{Name: "node1"}},
+		CephVersion: cephv1.CephVersionSpec{Image: "quay.io/ceph/ceph:v15"},
+		Storage: cephv1.StorageScopeSpec{
+			Selection: cephv1.Selection{UseAllDevices: &allDevices, DeviceFilter: deviceName},
+			Nodes:     []cephv1.Node{{Name: "node1"}},
 		},
-		PriorityClassNames: map[rookv1.KeyType]string{
+		PriorityClassNames: map[rook.KeyType]string{
 			cephv1.KeyOSD: "my-priority-class",
 		},
-		Annotations: rookv1.AnnotationsSpec{
+		Annotations: cephv1.AnnotationsSpec{
 			"osd": map[string]string{
 				"TCMALLOC_MAX_TOTAL_THREAD_CACHE_BYTES": "134217728",
 			},
@@ -165,7 +165,7 @@ func testPodDevices(t *testing.T, dataDir, deviceName string, allDevices bool) {
 
 	assert.Equal(t, 2, len(deployment.Spec.Template.Spec.InitContainers))
 	initCont := deployment.Spec.Template.Spec.InitContainers[0]
-	assert.Equal(t, "ceph/ceph:v15", initCont.Image)
+	assert.Equal(t, "quay.io/ceph/ceph:v15", initCont.Image)
 	assert.Equal(t, "activate", initCont.Name)
 	assert.Equal(t, 4, len(initCont.VolumeMounts))
 
@@ -384,8 +384,7 @@ func testPodDevices(t *testing.T, dataDir, deviceName string, allDevices bool) {
 	assert.Equal(t, 1, len(deployment.Spec.Template.Spec.Containers))
 	cont = deployment.Spec.Template.Spec.Containers[0]
 	assert.Equal(t, 7, len(cont.VolumeMounts), cont.VolumeMounts)
-	assert.Equal(t, 10, len(deployment.Spec.Template.Spec.Volumes), deployment.Spec.Template.Spec.Volumes)                                     // One more than the encryption with k8s for the kek get init container
-	assert.Equal(t, 0, len(deployment.Spec.Template.Spec.Volumes[7].VolumeSource.Projected.Sources), deployment.Spec.Template.Spec.Volumes[0]) // 0 since we have no tls secrets
+	assert.Equal(t, 9, len(deployment.Spec.Template.Spec.Volumes), deployment.Spec.Template.Spec.Volumes) // One more than the encryption with k8s for the kek get init container
 
 	// Test with encrypted OSD on PVC with RAW with KMS with TLS
 	osdProp.encrypted = true
@@ -479,11 +478,11 @@ func TestStorageSpecConfig(t *testing.T) {
 	context := &clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook", Executor: &exectest.MockExecutor{}}
 	spec := cephv1.ClusterSpec{
 		DataDirHostPath: context.ConfigDir,
-		Storage: rookv1.StorageScopeSpec{
+		Storage: cephv1.StorageScopeSpec{
 			Config: map[string]string{
 				"crushRoot": "custom-root",
 			},
-			Nodes: []rookv1.Node{
+			Nodes: []cephv1.Node{
 				{
 					Name: "node1",
 					Config: map[string]string{
@@ -491,7 +490,7 @@ func TestStorageSpecConfig(t *testing.T) {
 						"walSizeMB":      "20",
 						"metadataDevice": "nvme093",
 					},
-					Selection: rookv1.Selection{},
+					Selection: cephv1.Selection{},
 					Resources: v1.ResourceRequirements{
 						Limits: v1.ResourceList{
 							v1.ResourceCPU:    *resource.NewQuantity(1024.0, resource.BinarySI),
@@ -540,8 +539,8 @@ func TestStorageSpecConfig(t *testing.T) {
 }
 
 func TestHostNetwork(t *testing.T) {
-	storageSpec := rookv1.StorageScopeSpec{
-		Nodes: []rookv1.Node{
+	storageSpec := cephv1.StorageScopeSpec{
+		Nodes: []cephv1.Node{
 			{
 				Name: "node1",
 				Config: map[string]string{
@@ -701,7 +700,7 @@ func getDummyDeploymentOnNode(clientset *fake.Clientset, c *Cluster, nodeName st
 		BlockPath: "/dev/vda",
 		CVMode:    "raw",
 	}
-	c.ValidStorage.Nodes = append(c.ValidStorage.Nodes, rookv1.Node{Name: nodeName})
+	c.ValidStorage.Nodes = append(c.ValidStorage.Nodes, cephv1.Node{Name: nodeName})
 	config := c.newProvisionConfig()
 	d, err := deploymentOnNode(c, osd, nodeName, config)
 	if err != nil {
@@ -721,7 +720,7 @@ func TestOSDPlacement(t *testing.T) {
 	context := &clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook", Executor: &exectest.MockExecutor{}}
 
 	spec := cephv1.ClusterSpec{
-		Placement: rookv1.PlacementSpec{
+		Placement: cephv1.PlacementSpec{
 			"all": {
 				NodeAffinity: &v1.NodeAffinity{
 					RequiredDuringSchedulingIgnoredDuringExecution: &v1.NodeSelector{
@@ -768,7 +767,7 @@ func TestOSDPlacement(t *testing.T) {
 				},
 			},
 		},
-		Storage: rookv1.StorageScopeSpec{
+		Storage: cephv1.StorageScopeSpec{
 			OnlyApplyOSDPlacement: false,
 		},
 	}
@@ -778,7 +777,7 @@ func TestOSDPlacement(t *testing.T) {
 			ClaimName: "pvc1",
 		},
 	}
-	osdProps.placement = rookv1.Placement{NodeAffinity: &corev1.NodeAffinity{
+	osdProps.placement = cephv1.Placement{NodeAffinity: &corev1.NodeAffinity{
 		RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
 			NodeSelectorTerms: []corev1.NodeSelectorTerm{
 				{
@@ -795,7 +794,7 @@ func TestOSDPlacement(t *testing.T) {
 	},
 	}
 
-	osdProps.preparePlacement = &rookv1.Placement{NodeAffinity: &corev1.NodeAffinity{
+	osdProps.preparePlacement = &cephv1.Placement{NodeAffinity: &corev1.NodeAffinity{
 		RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
 			NodeSelectorTerms: []corev1.NodeSelectorTerm{
 				{

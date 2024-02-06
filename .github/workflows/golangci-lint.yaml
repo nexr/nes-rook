@@ -4,17 +4,12 @@ on:
     tags:
       - v*
     branches:
-      - release-*
       - master
-    paths:
-      - '**.go'
+      - release-*
   pull_request:
     branches:
       - master
       - release-*
-
-    paths:
-      - '**.go'
 
 jobs:
   golangci:
@@ -25,6 +20,8 @@ jobs:
         with:
           go-version: 1.16
       - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v2
         with:

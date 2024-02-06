@@ -19,6 +19,7 @@ package client
 import (
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
@@ -35,7 +36,7 @@ func TestFinalizeCephCommandArgs(t *testing.T) {
 	args := []string{"quorum_status"}
 	expectedArgs := []string{
 		"quorum_status",
-		"--connect-timeout=" + strconv.Itoa(int(exec.CephCommandTimeout.Seconds())),
+		"--connect-timeout=" + strconv.Itoa(int(exec.CephCommandsTimeout.Seconds())),
 		"--cluster=rook",
 		"--conf=/var/lib/rook/rook-ceph/rook/rook.config",
 		"--name=client.admin",
@@ -98,6 +99,7 @@ func TestFinalizeCephCommandArgsToolBox(t *testing.T) {
 	}
 
 	clusterInfo := AdminClusterInfo("rook")
+	exec.CephCommandsTimeout = 15 * time.Second
 	cmd, args := FinalizeCephCommandArgs(expectedCommand, clusterInfo, args, configDir)
 	assert.Exactly(t, "kubectl", cmd)
 	assert.Exactly(t, expectedArgs, args)
@@ -137,7 +139,7 @@ func TestNewRBDCommand(t *testing.T) {
 		assert.Error(t, err)
 		assert.Len(t, cmd.args, 4)
 		// This is not the best but it shows we go through the right codepath
-		assert.EqualError(t, err, "no pods found with selector \"rook-ceph-mgr\"")
+		assert.Contains(t, err.Error(), "no pods found with selector \"rook-ceph-mgr\"")
 	})
 
 }

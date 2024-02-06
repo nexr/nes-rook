@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"syscall"
 	"testing"
 	"time"
 
@@ -57,7 +58,14 @@ const (
     "system": "true",
     "temp_url_keys": [],
     "type": "rgw",
-    "mfa_ids": []
+    "mfa_ids": [],
+	"user_quota": {
+		"enabled": false,
+		"check_on_raw": false,
+		"max_size": -1,
+		"max_size_kb": 0,
+		"max_objects": -1
+	}
 }`
 	access_key = "VFKF8SSU9L3L2UR03Z8C"
 )
@@ -106,8 +114,7 @@ func deleteStore(t *testing.T, name string, existingStores string, expectedDelet
 	executor := &exectest.MockExecutor{}
 	deletedRootPool := false
 	deletedErasureCodeProfile := false
-	executor.MockExecuteCommandWithOutputFile = func(command, outputFile string, args ...string) (string, error) {
-		//logger.Infof("command: %s %v", command, args)
+	mockExecutorFuncOutput := func(command string, args ...string) (string, error) {
 		if args[0] == "osd" {
 			if args[1] == "pool" {
 				if args[2] == "get" {
@@ -141,10 +148,6 @@ func deleteStore(t *testing.T, name string, existingStores string, expectedDelet
 				}
 			}
 		}
-		return "", errors.Errorf("unexpected ceph command %q", args)
-	}
-
-	mockExecutorFuncOutput := func(command string, args ...string) (string, error) {
 		if args[0] == "realm" {
 			if args[1] == "delete" {
 				realmDeleted = true
@@ -249,7 +252,7 @@ func TestGetObjectBucketProvisioner(t *testing.T) {
 func TestDashboard(t *testing.T) {
 	storeName := "myobject"
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			return "", nil
 		},
 		MockExecuteCommandWithTimeout: func(timeout time.Duration, command string, args ...string) (string, error) {
@@ -269,7 +272,7 @@ func TestDashboard(t *testing.T) {
 	err = enableRGWDashboard(objContext)
 	assert.Nil(t, err)
 	executor = &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			if args[0] == "dashboard" && args[1] == "get-rgw-api-access-key" {
 				return access_key, nil
 			}
@@ -289,7 +292,7 @@ func TestDashboard(t *testing.T) {
 	err = enableRGWDashboard(objContext)
 	assert.Nil(t, err)
 	executor = &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			if args[0] == "dashboard" && args[1] == "get-rgw-api-access-key" {
 				return access_key, nil
 			}
@@ -301,4 +304,262 @@ func TestDashboard(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, checkdashboard)
 	disableRGWDashboard(objContext)
+}
+
+// import TestMockExecHelperProcess
+func TestMockExecHelperProcess(t *testing.T) {
+	exectest.TestMockExecHelperProcess(t)
+}
+
+func Test_createMultisite(t *testing.T) {
+	// control the return values from calling get/create/update on resources
+	type commandReturns struct {
+		realmExists             bool
+		zoneGroupExists         bool
+		zoneExists              bool
+		failCreateRealm         bool
+		failCreateZoneGroup     bool
+		failCreateZone          bool
+		failCommitConfigChanges bool
+	}
+
+	// control whether we should expect certain 'get' calls
+	type expectCommands struct {
+		getRealm            bool
+		createRealm         bool
+		getZoneGroup        bool
+		createZoneGroup     bool
+		getZone             bool
+		createZone          bool
+		commitConfigChanges bool
+	}
+
+	// vars used for testing if calls were made
+	var (
+		calledGetRealm            = false
+		calledGetZoneGroup        = false
+		calledGetZone             = false
+		calledCreateRealm         = false
+		calledCreateZoneGroup     = false
+		calledCreateZone          = false
+		calledCommitConfigChanges = false
+	)
+
+	commitConfigChangesOrig := commitConfigChanges
+	defer func() { commitConfigChanges = commitConfigChangesOrig }()
+
+	enoentIfNotExist := func(resourceExists bool) (string, error) {
+		if !resourceExists {
+			return "", exectest.MockExecCommandReturns(t, "", "", int(syscall.ENOENT))
+		}
+		return "{}", nil // get wants json, and {} is the most basic json
+	}
+
+	errorIfFail := func(shouldFail bool) (string, error) {
+		if shouldFail {
+			return "", exectest.MockExecCommandReturns(t, "", "basic error", 1)
+		}
+		return "", nil
+	}
+
+	setupTest := func(env commandReturns) *exectest.MockExecutor {
+		// reset output testing vars
+		calledGetRealm = false
+		calledCreateRealm = false
+		calledGetZoneGroup = false
+		calledCreateZoneGroup = false
+		calledGetZone = false
+		calledCreateZone = false
+		calledCommitConfigChanges = false
+
+		commitConfigChanges = func(c *Context) error {
+			calledCommitConfigChanges = true
+			if env.failCommitConfigChanges {
+				return errors.New("fake error from CommitConfigChanges")
+			}
+			return nil
+		}
+
+		return &exectest.MockExecutor{
+			MockExecuteCommandWithTimeout: func(timeout time.Duration, command string, arg ...string) (string, error) {
+				if command == "radosgw-admin" {
+					switch arg[0] {
+					case "realm":
+						switch arg[1] {
+						case "get":
+							calledGetRealm = true
+							return enoentIfNotExist(env.realmExists)
+						case "create":
+							calledCreateRealm = true
+							return errorIfFail(env.failCreateRealm)
+						}
+					case "zonegroup":
+						switch arg[1] {
+						case "get":
+							calledGetZoneGroup = true
+							return enoentIfNotExist(env.zoneGroupExists)
+						case "create":
+							calledCreateZoneGroup = true
+							return errorIfFail(env.failCreateZoneGroup)
+						}
+					case "zone":
+						switch arg[1] {
+						case "get":
+							calledGetZone = true
+							return enoentIfNotExist(env.zoneExists)
+						case "create":
+							calledCreateZone = true
+							return errorIfFail(env.failCreateZone)
+						}
+					}
+				}
+				t.Fatalf("unhandled command: %s %v", command, arg)
+				panic("unhandled command")
+			},
+		}
+	}
+
+	expectNoErr := false // want no error
+	expectErr := true    // want an error
+
+	tests := []struct {
+		name           string
+		commandReturns commandReturns
+		expectCommands expectCommands
+		wantErr        bool
+	}{
+		{"create realm, zonegroup, and zone; commit config",
+			commandReturns{
+				// nothing exists, and all should succeed
+			},
+			expectCommands{
+				getRealm:            true,
+				createRealm:         true,
+				getZoneGroup:        true,
+				createZoneGroup:     true,
+				getZone:             true,
+				createZone:          true,
+				commitConfigChanges: true,
+			},
+			expectNoErr},
+		{"fail creating realm",
+			commandReturns{
+				failCreateRealm: true,
+			},
+			expectCommands{
+				getRealm:    true,
+				createRealm: true,
+				// when we fail to create realm, we should not continue
+			},
+			expectErr},
+		{"fail creating zonegroup",
+			commandReturns{
+				failCreateZoneGroup: true,
+			},
+			expectCommands{
+				getRealm:        true,
+				createRealm:     true,
+				getZoneGroup:    true,
+				createZoneGroup: true,
+				// when we fail to create zonegroup, we should not continue
+			},
+			expectErr},
+		{"fail creating zone",
+			commandReturns{
+				failCreateZone: true,
+			},
+			expectCommands{
+				getRealm:        true,
+				createRealm:     true,
+				getZoneGroup:    true,
+				createZoneGroup: true,
+				getZone:         true,
+				createZone:      true,
+				// when we fail to create zone, we should not continue
+			},
+			expectErr},
+		{"fail commit config",
+			commandReturns{
+				failCommitConfigChanges: true,
+			},
+			expectCommands{
+				getRealm:            true,
+				createRealm:         true,
+				getZoneGroup:        true,
+				createZoneGroup:     true,
+				getZone:             true,
+				createZone:          true,
+				commitConfigChanges: true,
+			},
+			expectErr},
+		{"realm exists; create zonegroup and zone; commit config",
+			commandReturns{
+				realmExists: true,
+			},
+			expectCommands{
+				getRealm:            true,
+				createRealm:         false,
+				getZoneGroup:        true,
+				createZoneGroup:     true,
+				getZone:             true,
+				createZone:          true,
+				commitConfigChanges: true,
+			},
+			expectNoErr},
+		{"realm and zonegroup exist; create zone; commit config",
+			commandReturns{
+				realmExists:     true,
+				zoneGroupExists: true,
+			},
+			expectCommands{
+				getRealm:            true,
+				createRealm:         false,
+				getZoneGroup:        true,
+				createZoneGroup:     false,
+				getZone:             true,
+				createZone:          true,
+				commitConfigChanges: true,
+			},
+			expectNoErr},
+		{"realm, zonegroup, and zone exist; commit config",
+			commandReturns{
+				realmExists:     true,
+				zoneGroupExists: true,
+				zoneExists:      true,
+			},
+			expectCommands{
+				getRealm:            true,
+				createRealm:         false,
+				getZoneGroup:        true,
+				createZoneGroup:     false,
+				getZone:             true,
+				createZone:          false,
+				commitConfigChanges: true,
+			},
+			expectNoErr},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			executor := setupTest(tt.commandReturns)
+			ctx := &clusterd.Context{
+				Executor: executor,
+			}
+			objContext := NewContext(ctx, &client.ClusterInfo{Namespace: "my-cluster"}, "my-store")
+
+			// assumption: endpointArg is sufficiently tested by integration tests
+			err := createMultisite(objContext, "")
+			assert.Equal(t, tt.expectCommands.getRealm, calledGetRealm)
+			assert.Equal(t, tt.expectCommands.createRealm, calledCreateRealm)
+			assert.Equal(t, tt.expectCommands.getZoneGroup, calledGetZoneGroup)
+			assert.Equal(t, tt.expectCommands.createZoneGroup, calledCreateZoneGroup)
+			assert.Equal(t, tt.expectCommands.getZone, calledGetZone)
+			assert.Equal(t, tt.expectCommands.createZone, calledCreateZone)
+			assert.Equal(t, tt.expectCommands.commitConfigChanges, calledCommitConfigChanges)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Kubernetes Authors.
+Copyright 2018 The Rook Authors. All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -36,8 +36,19 @@ type S3Agent struct {
 	Client *s3.S3
 }
 
-func NewS3Agent(accessKey, secretKey, endpoint string, debug bool, tlsCert []byte) (*S3Agent, error) {
-	const cephRegion = "us-east-1"
+func NewS3Agent(accessKey, secretKey, endpoint, region string, debug bool, tlsCert []byte) (*S3Agent, error) {
+	return newS3Agent(accessKey, secretKey, endpoint, region, debug, tlsCert, false)
+}
+
+func NewInsecureS3Agent(accessKey, secretKey, endpoint, region string, debug bool) (*S3Agent, error) {
+	return newS3Agent(accessKey, secretKey, endpoint, region, debug, nil, true)
+}
+
+func newS3Agent(accessKey, secretKey, endpoint, region string, debug bool, tlsCert []byte, insecure bool) (*S3Agent, error) {
+	var cephRegion = "us-east-1"
+	if region != "" {
+		cephRegion = region
+	}
 
 	logLevel := aws.LogOff
 	if debug {
@@ -47,9 +58,9 @@ func NewS3Agent(accessKey, secretKey, endpoint string, debug bool, tlsCert []byt
 		Timeout: HttpTimeOut,
 	}
 	tlsEnabled := false
-	if len(tlsCert) > 0 {
-		client.Transport = BuildTransportTLS(tlsCert)
+	if len(tlsCert) > 0 || insecure {
 		tlsEnabled = true
+		client.Transport = BuildTransportTLS(tlsCert, insecure)
 	}
 	sess, err := session.NewSession(
 		aws.NewConfig().
@@ -187,11 +198,16 @@ func (s *S3Agent) DeleteObjectInBucket(bucketname string, key string) (bool, err
 	return true, nil
 }
 
-func BuildTransportTLS(tlsCert []byte) *http.Transport {
-	caCertPool := x509.NewCertPool()
-	caCertPool.AppendCertsFromPEM(tlsCert)
+func BuildTransportTLS(tlsCert []byte, insecure bool) *http.Transport {
+	// #nosec G402 is enabled only for testing
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: insecure}
+	if len(tlsCert) > 0 {
+		caCertPool := x509.NewCertPool()
+		caCertPool.AppendCertsFromPEM(tlsCert)
+		tlsConfig.RootCAs = caCertPool
+	}
 
 	return &http.Transport{
-		TLSClientConfig: &tls.Config{RootCAs: caCertPool, MinVersion: tls.VersionTLS12},
+		TLSClientConfig: tlsConfig,
 	}
 }

@@ -37,6 +37,10 @@ import (
 
 const (
 	ganeshaRadosGraceCmd = "ganesha-rados-grace"
+	// Default RADOS pool name after the NFS changes in Ceph
+	postNFSChangeDefaultPoolName = ".nfs"
+	// Default RADOS pool name before the NFS changes in Ceph
+	preNFSChangeDefaultPoolName = "nfs-ganesha"
 )
 
 var updateDeploymentAndWait = opmon.UpdateCephDeploymentAndWait
@@ -268,15 +272,29 @@ func validateGanesha(context *clusterd.Context, clusterInfo *cephclient.ClusterI
 		return errors.New("missing RADOS.pool")
 	}
 
+	if n.Spec.RADOS.Namespace == "" {
+		return errors.New("missing RADOS.namespace")
+	}
+
 	// Ganesha server properties
 	if n.Spec.Server.Active == 0 {
 		return errors.New("at least one active server required")
 	}
 
-	// The existence of the pool provided in n.Spec.RADOS.Pool is necessary otherwise addRADOSConfigFile() will fail
-	_, err := cephclient.GetPoolDetails(context, clusterInfo, n.Spec.RADOS.Pool)
+	return nil
+}
+
+// create and enable default RADOS pool
+func (r *ReconcileCephNFS) createDefaultNFSRADOSPool(n *cephv1.CephNFS) error {
+	poolName := n.Spec.RADOS.Pool
+	// Settings are not always declared and CreateReplicatedPoolForApp does not accept a pointer for
+	// the pool spec
+	if n.Spec.RADOS.PoolConfig == nil {
+		n.Spec.RADOS.PoolConfig = &cephv1.PoolSpec{}
+	}
+	err := cephclient.CreateReplicatedPoolForApp(r.context, r.clusterInfo, r.cephClusterSpec, poolName, *n.Spec.RADOS.PoolConfig, cephclient.DefaultPGCount, "nfs")
 	if err != nil {
-		return errors.Wrapf(err, "pool %q not found", n.Spec.RADOS.Pool)
+		return err
 	}
 
 	return nil

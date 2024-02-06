@@ -67,8 +67,6 @@ var logger = capnslog.NewPackageLogger("github.com/rook/rook", "ceph-spec")
 
 var (
 	cronLogRotate = `
-set -xe
-
 CEPH_CLIENT_ID=%s
 PERIODICITY=%s
 LOG_ROTATE_CEPH_FILE=/etc/logrotate.d/ceph
@@ -607,12 +605,13 @@ func (c *daemonConfig) buildAdminSocketCommand() string {
 	return command
 }
 
+func HostPathRequiresPrivileged() bool {
+	return os.Getenv("ROOK_HOSTPATH_REQUIRES_PRIVILEGED") == "true"
+}
+
 // PodSecurityContext detects if the pod needs privileges to run
 func PodSecurityContext() *v1.SecurityContext {
-	privileged := false
-	if os.Getenv("ROOK_HOSTPATH_REQUIRES_PRIVILEGED") == "true" {
-		privileged = true
-	}
+	privileged := HostPathRequiresPrivileged()
 
 	return &v1.SecurityContext{
 		Privileged: &privileged,
@@ -625,13 +624,18 @@ func LogCollectorContainer(daemonID, ns string, c cephv1.ClusterSpec) *v1.Contai
 		Name: logCollector,
 		Command: []string{
 			"/bin/bash",
-			"-c",
+			"-x", // Print commands and their arguments as they are executed
+			"-e", // Exit immediately if a command exits with a non-zero status.
+			"-m", // Terminal job control, allows job to be terminated by SIGTERM
+			"-c", // Command to run
 			fmt.Sprintf(cronLogRotate, daemonID, c.LogCollector.Periodicity),
 		},
 		Image:           c.CephVersion.Image,
 		VolumeMounts:    DaemonVolumeMounts(config.NewDatalessDaemonDataPathMap(ns, c.DataDirHostPath), ""),
 		SecurityContext: PodSecurityContext(),
 		Resources:       cephv1.GetLogCollectorResources(c.Resources),
+		// We need a TTY for the bash job control (enabled by -m)
+		TTY: true,
 	}
 }
 

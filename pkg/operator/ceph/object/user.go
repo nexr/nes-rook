@@ -37,13 +37,16 @@ const (
 
 // An ObjectUser defines the details of an object store user.
 type ObjectUser struct {
-	UserID       string  `json:"userId"`
-	DisplayName  *string `json:"displayName"`
-	Email        *string `json:"email"`
-	AccessKey    *string `json:"accessKey"`
-	SecretKey    *string `json:"secretKey"`
-	SystemUser   bool    `json:"systemuser"`
-	AdminOpsUser bool    `json:"adminopsuser"`
+	UserID       string              `json:"userId"`
+	DisplayName  *string             `json:"displayName"`
+	Email        *string             `json:"email"`
+	AccessKey    *string             `json:"accessKey"`
+	SecretKey    *string             `json:"secretKey"`
+	SystemUser   bool                `json:"systemuser"`
+	AdminOpsUser bool                `json:"adminopsuser"`
+	MaxBuckets   int                 `json:"max_buckets"`
+	UserQuota    admin.QuotaSpec     `json:"user_quota"`
+	Caps         []admin.UserCapSpec `json:"caps"`
 }
 
 // func decodeUser(data string) (*ObjectUser, int, error) {
@@ -55,6 +58,18 @@ func decodeUser(data string) (*ObjectUser, int, error) {
 	}
 
 	rookUser := ObjectUser{UserID: user.ID, DisplayName: &user.DisplayName, Email: &user.Email}
+
+	if len(user.Caps) > 0 {
+		rookUser.Caps = user.Caps
+	}
+
+	if user.MaxBuckets != nil {
+		rookUser.MaxBuckets = *user.MaxBuckets
+	}
+
+	if user.UserQuota.Enabled != nil {
+		rookUser.UserQuota = user.UserQuota
+	}
 
 	if len(user.Keys) > 0 {
 		rookUser.AccessKey = &user.Keys[0].AccessKey
@@ -121,6 +136,10 @@ func CreateUser(c *Context, user ObjectUser) (*ObjectUser, int, error) {
 
 	result, err := runAdminCommand(c, true, args...)
 	if err != nil {
+		if code, err := exec.ExtractExitCode(err); err == nil && code == int(syscall.EEXIST) {
+			return nil, ErrorCodeFileExists, errors.New("s3 user already exists")
+		}
+
 		if strings.Contains(result, "could not create user: unable to create user, user: ") {
 			return nil, ErrorCodeFileExists, errors.New("s3 user already exists")
 		}

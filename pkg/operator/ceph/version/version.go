@@ -332,6 +332,9 @@ func IsSuperior(a, b CephVersion) bool {
 						return true
 					}
 				}
+				if a.CommitID != b.CommitID {
+					return true
+				}
 			}
 		}
 	}

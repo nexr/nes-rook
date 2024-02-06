@@ -23,7 +23,7 @@ import (
 
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
+	"github.com/rook/rook/pkg/apis/rook.io"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	clienttest "github.com/rook/rook/pkg/daemon/ceph/client/test"
@@ -36,6 +36,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 func TestPodSpecs(t *testing.T) {
@@ -60,7 +61,7 @@ func TestPodSpecs(t *testing.T) {
 		store:       store,
 		rookVersion: "rook/rook:myversion",
 		clusterSpec: &cephv1.ClusterSpec{
-			CephVersion: cephv1.CephVersionSpec{Image: "ceph/ceph:v15"},
+			CephVersion: cephv1.CephVersionSpec{Image: "quay.io/ceph/ceph:v15"},
 			Network: cephv1.NetworkSpec{
 				HostNetwork: true,
 			},
@@ -85,7 +86,7 @@ func TestPodSpecs(t *testing.T) {
 		s.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0].LabelSelector.MatchLabels)
 
 	podTemplate := cephtest.NewPodTemplateSpecTester(t, &s)
-	podTemplate.RunFullSuite(cephconfig.RgwType, "default", "rook-ceph-rgw", "mycluster", "ceph/ceph:myversion",
+	podTemplate.RunFullSuite(cephconfig.RgwType, "default", "rook-ceph-rgw", "mycluster", "quay.io/ceph/ceph:myversion",
 		"200", "100", "1337", "500", /* resources */
 		"my-priority-class")
 }
@@ -119,7 +120,7 @@ func TestSSLPodSpec(t *testing.T) {
 		context:     context,
 		rookVersion: "rook/rook:myversion",
 		clusterSpec: &cephv1.ClusterSpec{
-			CephVersion: cephv1.CephVersionSpec{Image: "ceph/ceph:v15"},
+			CephVersion: cephv1.CephVersionSpec{Image: "quay.io/ceph/ceph:v15"},
 			Network: cephv1.NetworkSpec{
 				HostNetwork: true,
 			},
@@ -156,7 +157,7 @@ func TestSSLPodSpec(t *testing.T) {
 	s, err := c.makeRGWPodSpec(rgwConfig)
 	assert.NoError(t, err)
 	podTemplate := cephtest.NewPodTemplateSpecTester(t, &s)
-	podTemplate.RunFullSuite(cephconfig.RgwType, "default", "rook-ceph-rgw", "mycluster", "ceph/ceph:myversion",
+	podTemplate.RunFullSuite(cephconfig.RgwType, "default", "rook-ceph-rgw", "mycluster", "quay.io/ceph/ceph:myversion",
 		"200", "100", "1337", "500", /* resources */
 		"my-priority-class")
 	// TLS Secret
@@ -180,19 +181,37 @@ func TestSSLPodSpec(t *testing.T) {
 	s, err = c.makeRGWPodSpec(rgwConfig)
 	assert.NoError(t, err)
 	podTemplate = cephtest.NewPodTemplateSpecTester(t, &s)
-	podTemplate.RunFullSuite(cephconfig.RgwType, "default", "rook-ceph-rgw", "mycluster", "ceph/ceph:myversion",
+	podTemplate.RunFullSuite(cephconfig.RgwType, "default", "rook-ceph-rgw", "mycluster", "quay.io/ceph/ceph:myversion",
 		"200", "100", "1337", "500", /* resources */
 		"my-priority-class")
 	// Using service serving cert
 	c.store.Spec.Gateway.SSLCertificateRef = ""
-	c.store.Spec.Gateway.Service = &(cephv1.RGWServiceSpec{Annotations: rookv1.Annotations{cephv1.ServiceServingCertKey: "rgw-cert"}})
+	c.store.Spec.Gateway.Service = &(cephv1.RGWServiceSpec{Annotations: rook.Annotations{cephv1.ServiceServingCertKey: "rgw-cert"}})
 	secretVolSrc, err = c.generateVolumeSourceWithTLSSecret()
 	assert.NoError(t, err)
 	assert.Equal(t, secretVolSrc.SecretName, "rgw-cert")
+	// Using caBundleRef
+	// Opaque Secret
+	c.store.Spec.Gateway.CaBundleRef = "mycabundle"
+	cabundlesecret := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      c.store.Spec.Gateway.CaBundleRef,
+			Namespace: c.store.Namespace,
+		},
+		Data: map[string][]byte{
+			"cabundle": []byte("cabundletesting"),
+		},
+		Type: v1.SecretTypeOpaque,
+	}
+	_, err = c.context.Clientset.CoreV1().Secrets(store.Namespace).Create(ctx, cabundlesecret, metav1.CreateOptions{})
+	assert.NoError(t, err)
+	caBundleVolSrc, err := c.generateVolumeSourceWithCaBundleSecret()
+	assert.NoError(t, err)
+	assert.Equal(t, caBundleVolSrc.SecretName, "mycabundle")
 	s, err = c.makeRGWPodSpec(rgwConfig)
 	assert.NoError(t, err)
 	podTemplate = cephtest.NewPodTemplateSpecTester(t, &s)
-	podTemplate.RunFullSuite(cephconfig.RgwType, "default", "rook-ceph-rgw", "mycluster", "ceph/ceph:myversion",
+	podTemplate.RunFullSuite(cephconfig.RgwType, "default", "rook-ceph-rgw", "mycluster", "quay.io/ceph/ceph:myversion",
 		"200", "100", "1337", "500", /* resources */
 		"my-priority-class")
 
@@ -203,7 +222,7 @@ func TestSSLPodSpec(t *testing.T) {
 
 func TestValidateSpec(t *testing.T) {
 	executor := &exectest.MockExecutor{}
-	executor.MockExecuteCommandWithOutputFile = func(command, outputFile string, args ...string) (string, error) {
+	executor.MockExecuteCommandWithOutput = func(command string, args ...string) (string, error) {
 		logger.Infof("Command: %s %v", command, args)
 		if args[1] == "crush" && args[2] == "dump" {
 			return `{"types":[{"type_id": 0,"name": "osd"}, {"type_id": 1,"name": "host"}],"buckets":[{"id": -1,"name":"default"},{"id": -2,"name":"good"}, {"id": -3,"name":"host"}]}`, nil
@@ -265,7 +284,7 @@ func TestValidateSpec(t *testing.T) {
 	assert.Nil(t, err)
 }
 
-func TestGenerateLiveProbe(t *testing.T) {
+func TestDefaultLivenessProbe(t *testing.T) {
 	store := simpleStore()
 	c := &clusterConfig{
 		store: store,
@@ -276,33 +295,93 @@ func TestGenerateLiveProbe(t *testing.T) {
 		},
 	}
 
+	desiredProbe := &v1.Probe{
+		Handler: v1.Handler{
+			TCPSocket: &v1.TCPSocketAction{
+				Port: intstr.FromInt(8080),
+			},
+		},
+		InitialDelaySeconds: 10,
+	}
 	// No SSL - HostNetwork is disabled - using internal port
-	p := c.generateLiveProbe()
-	assert.Equal(t, int32(8080), p.Handler.HTTPGet.Port.IntVal)
-	assert.Equal(t, v1.URISchemeHTTP, p.Handler.HTTPGet.Scheme)
+	p := c.defaultLivenessProbe()
+	assert.Equal(t, desiredProbe, p)
 
 	// No SSL - HostNetwork is enabled
 	c.store.Spec.Gateway.Port = 123
 	c.store.Spec.Gateway.SecurePort = 0
 	c.clusterSpec.Network.HostNetwork = true
-	p = c.generateLiveProbe()
-	assert.Equal(t, int32(123), p.Handler.HTTPGet.Port.IntVal)
+	p = c.defaultLivenessProbe()
+	desiredProbe.Handler.TCPSocket.Port = intstr.FromInt(123)
+	assert.Equal(t, desiredProbe, p)
 
 	// SSL - HostNetwork is enabled
 	c.store.Spec.Gateway.Port = 0
 	c.store.Spec.Gateway.SecurePort = 321
 	c.store.Spec.Gateway.SSLCertificateRef = "foo"
-	p = c.generateLiveProbe()
-	assert.Equal(t, int32(321), p.Handler.HTTPGet.Port.IntVal)
+	p = c.defaultLivenessProbe()
+	desiredProbe.Handler.TCPSocket.Port = intstr.FromInt(321)
+	assert.Equal(t, desiredProbe, p)
 
 	// Both Non-SSL and SSL are enabled
-	// liveprobe just on Non-SSL
+	// livenessProbe just on Non-SSL
 	c.store.Spec.Gateway.Port = 123
 	c.store.Spec.Gateway.SecurePort = 321
+	p = c.defaultLivenessProbe()
+	desiredProbe.Handler.TCPSocket.Port = intstr.FromInt(123)
+	assert.Equal(t, desiredProbe, p)
+}
+
+func TestDefaultReadinessProbe(t *testing.T) {
+	store := simpleStore()
+	c := &clusterConfig{
+		store: store,
+		clusterSpec: &cephv1.ClusterSpec{
+			Network: cephv1.NetworkSpec{
+				HostNetwork: false,
+			},
+		},
+	}
+
+	desiredProbe := &v1.Probe{
+		Handler: v1.Handler{
+			HTTPGet: &v1.HTTPGetAction{
+				Path:   readinessProbePath,
+				Port:   intstr.FromInt(8080),
+				Scheme: v1.URISchemeHTTP,
+			},
+		},
+		InitialDelaySeconds: 10,
+	}
+	// No SSL - HostNetwork is disabled - using internal port
+	p := c.defaultReadinessProbe()
+	assert.Equal(t, desiredProbe, p)
+
+	// No SSL - HostNetwork is enabled
+	c.store.Spec.Gateway.Port = 123
+	c.store.Spec.Gateway.SecurePort = 0
+	c.clusterSpec.Network.HostNetwork = true
+	p = c.defaultReadinessProbe()
+	desiredProbe.Handler.HTTPGet.Port = intstr.FromInt(123)
+	assert.Equal(t, desiredProbe, p)
+
+	// SSL - HostNetwork is enabled
+	c.store.Spec.Gateway.Port = 0
+	c.store.Spec.Gateway.SecurePort = 321
 	c.store.Spec.Gateway.SSLCertificateRef = "foo"
-	p = c.generateLiveProbe()
-	assert.Equal(t, v1.URISchemeHTTP, p.Handler.HTTPGet.Scheme)
-	assert.Equal(t, int32(123), p.Handler.HTTPGet.Port.IntVal)
+	p = c.defaultReadinessProbe()
+	desiredProbe.Handler.HTTPGet.Port = intstr.FromInt(321)
+	desiredProbe.Handler.HTTPGet.Scheme = v1.URISchemeHTTPS
+	assert.Equal(t, desiredProbe, p)
+
+	// Both Non-SSL and SSL are enabled
+	// readinessProbe just on Non-SSL
+	c.store.Spec.Gateway.Port = 123
+	c.store.Spec.Gateway.SecurePort = 321
+	p = c.defaultReadinessProbe()
+	desiredProbe.Handler.HTTPGet.Port = intstr.FromInt(123)
+	desiredProbe.Handler.HTTPGet.Scheme = v1.URISchemeHTTP
+	assert.Equal(t, desiredProbe, p)
 }
 
 func TestCheckRGWKMS(t *testing.T) {
@@ -344,6 +423,7 @@ func TestCheckRGWKMS(t *testing.T) {
 
 	// kv engine version v1, will fail
 	c.store.Spec.Security.KeyManagementService.ConnectionDetails["VAULT_SECRET_ENGINE"] = "kv"
+	c.store.Spec.Security.KeyManagementService.ConnectionDetails["VAULT_BACKEND"] = "v1"
 	b, err = c.CheckRGWKMS()
 	assert.False(t, b)
 	assert.Error(t, err)
@@ -360,4 +440,34 @@ func TestCheckRGWKMS(t *testing.T) {
 	b, err = c.CheckRGWKMS()
 	assert.True(t, b)
 	assert.NoError(t, err)
+}
+
+func TestGetDaemonName(t *testing.T) {
+	context := &clusterd.Context{Clientset: test.New(t, 3)}
+	store := simpleStore()
+	tests := []struct {
+		storeName      string
+		testDaemonName string
+		daemonID       string
+	}{
+		{"default", "ceph-client.rgw.default.a", "a"},
+		{"my-store", "ceph-client.rgw.my.store.b", "b"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.storeName, func(t *testing.T) {
+			c := &clusterConfig{
+				context: context,
+				store:   store,
+			}
+			c.store.Name = tt.storeName
+			daemonName := fmt.Sprintf("%s-%s", c.store.Name, tt.daemonID)
+			resourceName := fmt.Sprintf("%s-%s", AppName, daemonName)
+			rgwconfig := &rgwConfig{
+				ResourceName: resourceName,
+				DaemonID:     daemonName,
+			}
+			daemon := getDaemonName(rgwconfig)
+			assert.Equal(t, tt.testDaemonName, daemon)
+		})
+	}
 }

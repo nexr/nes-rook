@@ -32,7 +32,7 @@ metadata:
 spec:
   cephVersion:
     # see the "Cluster Settings" section below for more details on which image of ceph to run
-    image: ceph/ceph:v15.2.13
+    image: quay.io/ceph/ceph:v16.2.6
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -60,7 +60,7 @@ metadata:
 spec:
   cephVersion:
     # see the "Cluster Settings" section below for more details on which image of ceph to run
-    image: ceph/ceph:v15.2.13
+    image: quay.io/ceph/ceph:v16.2.6
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -96,8 +96,6 @@ For a more advanced scenario, such as adding a dedicated device you can refer to
 
 ## Stretch Cluster
 
-**Experimental Mode**
-
 For environments that only have two failure domains available where data can be replicated, consider
 the case where one failure domain is down and the data is still fully available in the
 remaining failure domain. To support this scenario, Ceph has recently integrated support for "stretch" clusters.
@@ -131,7 +129,7 @@ spec:
       - name: c
   cephVersion:
     # Stretch cluster is supported in Ceph Pacific or newer.
-    image: ceph/ceph:v16.2.2
+    image: quay.io/ceph/ceph:v16.2.6
     allowUnsupported: true
   # Either storageClassDeviceSets or the storage section can be specified for creating OSDs.
   # This example uses all devices for simplicity.
@@ -169,7 +167,7 @@ Settings can be specified at the global level to apply to the cluster as a whole
 * `external`:
   * `enable`: if `true`, the cluster will not be managed by Rook but via an external entity. This mode is intended to connect to an existing cluster. In this case, Rook will only consume the external cluster. However, Rook will be able to deploy various daemons in Kubernetes such as object gateways, mds and nfs if an image is provided and will refuse otherwise. If this setting is enabled **all** the other options will be ignored except `cephVersion.image` and `dataDirHostPath`. See [external cluster configuration](#external-cluster). If `cephVersion.image` is left blank, Rook will refuse the creation of extra CRs like object, file and nfs.
 * `cephVersion`: The version information for launching the ceph daemons.
-  * `image`: The image used for running the ceph daemons. For example, `ceph/ceph:v14.2.12` or `ceph/ceph:v15.2.13`. For more details read the [container images section](#ceph-container-images).
+  * `image`: The image used for running the ceph daemons. For example, `quay.io/ceph/ceph:v15.2.12` or `v16.2.6`. For more details read the [container images section](#ceph-container-images).
   For the latest ceph images, see the [Ceph DockerHub](https://hub.docker.com/r/ceph/ceph/tags/).
   To ensure a consistent version of the image is running across all nodes in the cluster, it is recommended to use a very specific image version.
   Tags also exist that would give the latest version, but they are only recommended for test environments. For example, the tag `v14` will be updated each time a new nautilus build is released.
@@ -198,7 +196,10 @@ If this value is empty, each pod will get an ephemeral directory to store their 
 * `mon`: contains mon related options [mon settings](#mon-settings)
 For more details on the mons and when to choose a number other than `3`, see the [mon health doc](ceph-mon-health.md).
 * `mgr`: manager top level section
-  * `count`: set number of ceph managers between `1` to `2`. The default value is 1. This is only needed if plural ceph managers are needed.
+  * `count`: set number of ceph managers between `1` to `2`. The default value is 1. This is only needed if two ceph managers are needed.
+    If there are two managers, it is important for all mgr services point to the active mgr and not the passive mgr. Therefore, Rook will
+    automatically update all services (in the cluster namespace) that have a label `app=rook-ceph-mgr` with a selector pointing to the
+    active mgr. This commonly applies to services for the dashboard or the prometheus metrics collector.
   * `modules`: is the list of Ceph manager modules to enable
 * `crashCollector`: The settings for crash collector daemon(s).
   * `disable`: is set to `true`, the crash collector will not run on any node where a Ceph daemon runs
@@ -223,6 +224,7 @@ For more details on the mons and when to choose a number other than `3`, see the
   * `onlyApplyOSDPlacement`: Whether the placement specific for OSDs is merged with the `all` placement. If `false`, the OSD placement will be merged with the `all` placement. If true, the `OSD placement will be applied` and the `all` placement will be ignored. The placement for OSDs is computed from several different places depending on the type of OSD:
     - For non-PVCs: `placement.all` and `placement.osd`
     - For PVCs: `placement.all` and inside the storageClassDeviceSet from the `placement` or `preparePlacement`
+* `disruptionManagement`: The section for configuring management of daemon disruptions
   * `managePodBudgets`: if `true`, the operator will create and manage PodDisruptionBudgets for OSD, Mon, RGW, and MDS daemons. OSD PDBs are managed dynamically via the strategy outlined in the [design](https://github.com/rook/rook/blob/master/design/ceph/ceph-managed-disruptionbudgets.md). The operator will block eviction of OSDs by default and unblock them safely when drains are detected.
   * `osdMaintenanceTimeout`: is a duration in minutes that determines how long an entire failureDomain like `region/zone/host` will be held in `noout` (in addition to the default DOWN/OUT interval) when it is draining. This is only relevant when  `managePodBudgets` is `true`. The default value is `30` minutes.
   * `manageMachineDisruptionBudgets`: if `true`, the operator will create and manage MachineDisruptionBudgets to ensure OSDs are only fenced when the cluster is healthy. Only available on OpenShift.
@@ -249,7 +251,12 @@ A specific will contain a specific release of Ceph as well as security fixes fro
 
 ### Mon Settings
 
-* `count`: Set the number of mons to be started. The number must be odd and between `1` and `9`. If not specified the default is set to `3`.
+* `count`: Set the number of mons to be started. The number must be between `1` and `9`. The recommended value is most commonly `3`.
+  For highest availability, an odd number of mons should be specified.
+  For higher durability in case of mon loss, an even number can be specified although availability may be lower.
+  To maintain quorum a majority of mons must be up. For example, if there are three mons, two must be up.
+  If there are four mons, three must be up. If there are two mons, both must be up.
+  If quorum is lost, see the [disaster recovery guide](ceph-disaster-recovery.md#restoring-mon-quorum) to restore quorum from a single mon.
 * `allowMultiplePerNode`: Whether to allow the placement of multiple mons on a single node. Default is `false` for production. Should only be set to `true` in test environments.
 * `volumeClaimTemplate`: A `PersistentVolumeSpec` used by Rook to create PVCs
   for monitor storage. This field is optional, and when not provided, HostPath
@@ -346,6 +353,9 @@ Based on the configuration, the operator will do the following:
 
 \* Internal cluster traffic includes OSD heartbeats, data replication, and data recovery
 
+Only OSD pods will have both Public and Cluster networks attached. The rest of the Ceph component pods and CSI pods will only have the Public network attached.
+Rook Ceph Operator will not have any networks attached as it proxies the required commands via a sidecar container in the mgr pod.
+
 In order to work, each selector value must match a `NetworkAttachmentDefinition` object name in Multus.
 
 For `multus` network provider, an already working cluster with Multus networking is required. Network attachment definition that later will be attached to the cluster needs to be created before the Cluster CRD.
@@ -384,6 +394,10 @@ spec:
   ```
   * This format is required in order to use the NetworkAttachmentDefinition across namespaces.
   * In Openshift, to use a NetworkAttachmentDefinition (NAD) across namespaces, the NAD must be deployed in the `default` namespace. The NAD is then referenced with the namespace: `default/rook-public-nw`
+
+#### Known issues with multus
+When a CephFS/RBD volume is mounted in a Pod using cephcsi and then the CSI CephFS/RBD plugin is restarted or terminated (e.g. by restarting or deleting its DaemonSet), all operations on the volume become blocked, even after restarting the CSI pods. The only workaround is to restart the node where the cephcsi plugin pod was restarted.
+This issue is tracked [here](https://github.com/rook/rook/issues/8085).
 
 #### IPFamily
 
@@ -441,7 +455,7 @@ Below are the settings for host-based cluster. This type of cluster can specify 
   * `config`: Device-specific config settings. See the [config settings](#osd-configuration-settings) below
 
 Host-based cluster only supports raw device and partition. Be sure to see the
-[Ceph quickstart doc prerequisites](ceph-quickstart.md#prerequisites) for additional considerations.
+[Ceph quickstart doc prerequisites](quickstart.md#prerequisites) for additional considerations.
 
 Below are the settings for a PVC-based cluster.
 
@@ -493,14 +507,8 @@ The following storage selection settings are specific to Ceph and do not apply t
 * `initialWeight`: The initial OSD weight in TiB units. By default, this value is derived from OSD's capacity.
 * `primaryAffinity`: The [primary-affinity](https://docs.ceph.com/en/latest/rados/operations/crush-map/#primary-affinity) value of an OSD, within range `[0, 1]` (default: `1`).
 * `osdsPerDevice`**: The number of OSDs to create on each device. High performance devices such as NVMe can handle running multiple OSDs. If desired, this can be overridden for each node and each device.
-* `encryptedDevice`**: Encrypt OSD volumes using dmcrypt ("true" or "false"). By default this option is disabled. See [encryption](http://docs.ceph.com/docs/nautilus/ceph-volume/lvm/encryption/) for more information on encryption in Ceph.
+* `encryptedDevice`**: Encrypt OSD volumes using dmcrypt ("true" or "false"). By default this option is disabled. See [encryption](http://docs.ceph.com/docs/master/ceph-volume/lvm/encryption/) for more information on encryption in Ceph.
 * `crushRoot`: The value of the `root` CRUSH map label. The default is `default`. Generally, you should not need to change this. However, if any of your topology labels may have the value `default`, you need to change `crushRoot` to avoid conflicts, since CRUSH map values need to be unique.
-
-**NOTE**: Depending on the Ceph image running in your cluster, OSDs will be configured differently. Newer images will configure OSDs with `ceph-volume`, which provides support for `osdsPerDevice`, `encryptedDevice`, as well as other features that will be exposed in future Rook releases. OSDs created prior to Rook v0.9 or with older images of Luminous and Mimic are not created with `ceph-volume` and thus would not support the same features. For `ceph-volume`, the following images are supported:
-
-* Luminous 12.2.10 or newer
-* Mimic 13.2.3 or newer
-* Nautilus
 
 ### Annotations and Labels
 
@@ -513,6 +521,8 @@ You can set annotations / labels for Rook components for the list of key value p
 * `mon`: Set annotations / labels for mons
 * `osd`: Set annotations / labels for OSDs
 * `prepareosd`: Set annotations / labels for OSD Prepare Jobs
+* `monitoring`: Set annotations / labels for service monitor
+* `crashcollector`: Set annotations / labels for crash collectors
 When other keys are set, `all` will be merged together with the specific component.
 
 ### Placement Configuration Settings
@@ -681,8 +691,8 @@ kubectl -n rook-ceph get CephCluster -o yaml
       deviceClasses:
       - name: hdd
     version:
-      image: ceph/ceph:v15
-      version: 15.2.9-0
+      image: quay.io/ceph/ceph:v16.2.6
+      version: 16.2.6-0
     conditions:
     - lastHeartbeatTime: "2021-03-02T21:22:11Z"
       lastTransitionTime: "2021-03-02T21:21:09Z"
@@ -743,7 +753,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v15.2.13
+    image: quay.io/ceph/ceph:v16.2.6
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -775,7 +785,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v15.2.13
+    image: quay.io/ceph/ceph:v16.2.6
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -815,7 +825,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v15.2.13
+    image: quay.io/ceph/ceph:v16.2.6
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -862,7 +872,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v15.2.13
+    image: quay.io/ceph/ceph:v16.2.6
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -968,7 +978,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v15.2.13
+    image: quay.io/ceph/ceph:v16.2.6
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -1014,7 +1024,7 @@ spec:
           requests:
             storage: 10Gi
   cephVersion:
-    image: ceph/ceph:v15.2.13
+    image: quay.io/ceph/ceph:v16.2.6
     allowUnsupported: false
   dashboard:
     enabled: true
@@ -1043,7 +1053,7 @@ spec:
                   operator: In
                   values:
                     - cluster1
-                topologyKey: "topology.kubernetes.io/zone"
+              topologyKey: "topology.kubernetes.io/zone"
       volumeClaimTemplates:
       - metadata:
           name: data
@@ -1472,38 +1482,8 @@ spec:
     enable: true
   dataDirHostPath: /var/lib/rook
   cephVersion:
-    image: ceph/ceph:v15.2.13 # Should match external cluster version
+    image: quay.io/ceph/ceph:v16.2.6 # Should match external cluster version
 ```
-
-### Cleanup policy
-
-Rook has the ability to cleanup resources and data that were deployed when a CephCluster is removed.
-The policy settings indicate which data should be forcibly deleted and in what way the data should be wiped.
-The `cleanupPolicy` has several fields:
-
-* `confirmation`: Only an empty string and `yes-really-destroy-data` are valid values for this field.
-  If this setting is empty, the cleanupPolicy settings will be ignored and Rook will not cleanup any resources during cluster removal.
-  To reinstall the cluster, the admin would then be required to follow the [cleanup guide](ceph-teardown.md) to delete the data on hosts.
-  If this setting is `yes-really-destroy-data`, the operator will automatically delete the data on hosts.
-  Because this cleanup policy is destructive, after the confirmation is set to `yes-really-destroy-data`
-  Rook will stop configuring the cluster as if the cluster is about to be destroyed.
-* `sanitizeDisks`: sanitizeDisks represents advanced settings that can be used to delete data on drives.
-  * `method`: indicates if the entire disk should be sanitized or simply ceph's metadata. Possible choices are 'quick' (default) or 'complete'
-  * `dataSource`: indicate where to get random bytes from to write on the disk. Possible choices are 'zero' (default) or 'random'.
-  Using random sources will consume entropy from the system and will take much more time then the zero source
-  * `iteration`: overwrite N times instead of the default (1). Takes an integer value
-* `allowUninstallWithVolumes`: If set to true, then the cephCluster deletion doesn't wait for the PVCs to be deleted. Default is false.
-
-To automate activation of the cleanup, you can use the following command. **WARNING: DATA WILL BE PERMANENTLY DELETED**:
-
-```console
-kubectl -n rook-ceph patch cephcluster rook-ceph --type merge -p '{"spec":{"cleanupPolicy":{"confirmation":"yes-really-destroy-data"}}}'
-```
-
-Nothing will happen until the deletion of the CR is requested, so this can still be reverted.
-However, all new configuration by the operator will be blocked with this cleanup policy enabled.
-
-Rook waits for the deletion of PVs provisioned using the cephCluster before proceeding to delete the cephCluster. To force deletion of the cephCluster without waiting for the PVs to be deleted,  you can set the allowUninstallWithVolumes to true under spec.CleanupPolicy.
 
 ### Security
 
@@ -1629,3 +1609,45 @@ data:
 
 Note: if you are using self-signed certificates (not known/approved by a proper CA) you must pass `VAULT_SKIP_VERIFY: true`.
 Communications will remain encrypted but the validity of the certificate will not be verified.
+
+### Deleting a CephCluster
+
+During deletion of a CephCluster resource, Rook protects against accidental or premature destruction
+of user data by blocking deletion if there are any other Rook-Ceph Custom Resources that reference
+the CephCluster being deleted. Rook will warn about which other resources are blocking deletion in
+three ways until all blocking resources are deleted:
+1. An event will be registered on the CephCluster resource
+1. A status condition will be added to the CephCluster resource
+1. An error will be added to the Rook-Ceph Operator log
+
+#### Cleanup policy
+
+Rook has the ability to cleanup resources and data that were deployed when a CephCluster is removed.
+The policy settings indicate which data should be forcibly deleted and in what way the data should be wiped.
+The `cleanupPolicy` has several fields:
+
+* `confirmation`: Only an empty string and `yes-really-destroy-data` are valid values for this field.
+  If this setting is empty, the cleanupPolicy settings will be ignored and Rook will not cleanup any resources during cluster removal.
+  To reinstall the cluster, the admin would then be required to follow the [cleanup guide](ceph-teardown.md) to delete the data on hosts.
+  If this setting is `yes-really-destroy-data`, the operator will automatically delete the data on hosts.
+  Because this cleanup policy is destructive, after the confirmation is set to `yes-really-destroy-data`
+  Rook will stop configuring the cluster as if the cluster is about to be destroyed.
+* `sanitizeDisks`: sanitizeDisks represents advanced settings that can be used to delete data on drives.
+  * `method`: indicates if the entire disk should be sanitized or simply ceph's metadata. Possible choices are 'quick' (default) or 'complete'
+  * `dataSource`: indicate where to get random bytes from to write on the disk. Possible choices are 'zero' (default) or 'random'.
+  Using random sources will consume entropy from the system and will take much more time then the zero source
+  * `iteration`: overwrite N times instead of the default (1). Takes an integer value
+* `allowUninstallWithVolumes`: If set to true, then the cephCluster deletion doesn't wait for the PVCs to be deleted. Default is false.
+
+To automate activation of the cleanup, you can use the following command. **WARNING: DATA WILL BE PERMANENTLY DELETED**:
+
+```console
+kubectl -n rook-ceph patch cephcluster rook-ceph --type merge -p '{"spec":{"cleanupPolicy":{"confirmation":"yes-really-destroy-data"}}}'
+```
+
+Nothing will happen until the deletion of the CR is requested, so this can still be reverted.
+However, all new configuration by the operator will be blocked with this cleanup policy enabled.
+
+Rook waits for the deletion of PVs provisioned using the cephCluster before proceeding to delete the
+cephCluster. To force deletion of the cephCluster without waiting for the PVs to be deleted, you can
+set the allowUninstallWithVolumes to true under spec.CleanupPolicy.

@@ -209,18 +209,7 @@ func GetDevicePropertiesFromPath(devicePath string, executor exec.Executor) (map
 	output, err := executor.ExecuteCommandWithOutput("lsblk", devicePath,
 		"--bytes", "--nodeps", "--pairs", "--paths", "--output", "SIZE,ROTA,RO,TYPE,PKNAME,NAME,KNAME")
 	if err != nil {
-		// The "not a block device" error also returns code 32 so the ExitStatus() check hides this error
-		if strings.Contains(output, "not a block device") {
-			return nil, err
-		}
-
-		// try to get more information about the command error
-		if code, ok := exec.ExitStatus(err); ok && code == 32 {
-			// certain device types (such as loop) return exit status 32 when probed further,
-			// ignore and continue without logging
-			return map[string]string{}, nil
-		}
-
+		logger.Errorf("failed to execute lsblk. output: %s", output)
 		return nil, err
 	}
 
@@ -418,13 +407,13 @@ func inventoryDevice(executor exec.Executor, devicePath string) (CephVolumeInven
 	args := []string{"inventory", "--format", "json", devicePath}
 	inventory, err := executor.ExecuteCommandWithOutput("ceph-volume", args...)
 	if err != nil {
-		return CVInventory, fmt.Errorf("failed to execute ceph-volume inventory on disk %q. %v", devicePath, err)
+		return CVInventory, fmt.Errorf("failed to execute ceph-volume inventory on disk %q. %s. %v", devicePath, inventory, err)
 	}
 
 	bInventory := []byte(inventory)
 	err = json.Unmarshal(bInventory, &CVInventory)
 	if err != nil {
-		return CVInventory, fmt.Errorf("error unmarshalling json data coming from ceph-volume inventory %q. %v", devicePath, err)
+		return CVInventory, fmt.Errorf("failed to unmarshal json data coming from ceph-volume inventory %q. %q. %v", devicePath, inventory, err)
 	}
 
 	return CVInventory, nil

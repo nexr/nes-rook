@@ -66,7 +66,7 @@ func FinalizeCephCommandArgs(command string, clusterInfo *ClusterInfo, args []st
 
 	// we could use a slice and iterate over it but since we have only 3 elements
 	// I don't think this is worth a loop
-	timeout := strconv.Itoa(int(exec.CephCommandTimeout.Seconds()))
+	timeout := strconv.Itoa(int(exec.CephCommandsTimeout.Seconds()))
 	if command != "rbd" && command != "crushtool" && command != "radosgw-admin" {
 		args = append(args, "--connect-timeout="+timeout)
 	}
@@ -96,18 +96,18 @@ type CephToolCommand struct {
 	args            []string
 	timeout         time.Duration
 	JsonOutput      bool
-	OutputFile      bool
+	combinedOutput  bool
 	RemoteExecution bool
 }
 
 func newCephToolCommand(tool string, context *clusterd.Context, clusterInfo *ClusterInfo, args []string) *CephToolCommand {
 	return &CephToolCommand{
-		context:     context,
-		tool:        tool,
-		clusterInfo: clusterInfo,
-		args:        args,
-		JsonOutput:  true,
-		OutputFile:  true,
+		context:        context,
+		tool:           tool,
+		clusterInfo:    clusterInfo,
+		args:           args,
+		JsonOutput:     true,
+		combinedOutput: false,
 	}
 }
 
@@ -118,7 +118,6 @@ func NewCephCommand(context *clusterd.Context, clusterInfo *ClusterInfo, args []
 func NewRBDCommand(context *clusterd.Context, clusterInfo *ClusterInfo, args []string) *CephToolCommand {
 	cmd := newCephToolCommand(RBDTool, context, clusterInfo, args)
 	cmd.JsonOutput = false
-	cmd.OutputFile = false
 
 	// When Multus is enabled, the RBD tool should run inside the proxy container
 	if clusterInfo.NetworkSpec.IsMultus() {
@@ -157,40 +156,27 @@ func (c *CephToolCommand) run() ([]byte, error) {
 	var output, stderr string
 	var err error
 
-	if c.OutputFile {
-		if command == Kubectl {
-			// Kubectl commands targeting the toolbox container generate a temp
-			// file in the wrong place, so we will instead capture the output
-			// from stdout for the tests
-			if c.timeout == 0 {
-				output, err = c.context.Executor.ExecuteCommandWithOutput(command, args...)
-			} else {
-				output, err = c.context.Executor.ExecuteCommandWithTimeout(c.timeout, command, args...)
-			}
-		} else {
-			if c.timeout == 0 {
-				output, err = c.context.Executor.ExecuteCommandWithOutputFile(command, "--out-file", args...)
-			} else {
-				output, err = c.context.Executor.ExecuteCommandWithOutputFileTimeout(c.timeout, command, "--out-file", args...)
-			}
-		}
-	} else {
-		// NewRBDCommand does not use the --out-file option so we only check for remote execution here
-		// Still forcing the check for the command if the behavior changes in the future
-		if command == RBDTool {
-			if c.RemoteExecution {
-				output, stderr, err = c.context.RemoteExecutor.ExecCommandInContainerWithFullOutputWithTimeout(ProxyAppLabel, CommandProxyInitContainerName, c.clusterInfo.Namespace, append([]string{command}, args...)...)
-				output = fmt.Sprintf("%s. %s", output, stderr)
-			} else if c.timeout == 0 {
-				output, err = c.context.Executor.ExecuteCommandWithOutput(command, args...)
-			} else {
-				output, err = c.context.Executor.ExecuteCommandWithTimeout(c.timeout, command, args...)
+	// NewRBDCommand does not use the --out-file option so we only check for remote execution here
+	// Still forcing the check for the command if the behavior changes in the future
+	if command == RBDTool {
+		if c.RemoteExecution {
+			output, stderr, err = c.context.RemoteExecutor.ExecCommandInContainerWithFullOutputWithTimeout(ProxyAppLabel, CommandProxyInitContainerName, c.clusterInfo.Namespace, append([]string{command}, args...)...)
+			if stderr != "" || err != nil {
+				err = errors.Errorf("%s. %s", err.Error(), stderr)
 			}
 		} else if c.timeout == 0 {
 			output, err = c.context.Executor.ExecuteCommandWithOutput(command, args...)
 		} else {
 			output, err = c.context.Executor.ExecuteCommandWithTimeout(c.timeout, command, args...)
 		}
+	} else if c.timeout == 0 {
+		if c.combinedOutput {
+			output, err = c.context.Executor.ExecuteCommandWithCombinedOutput(command, args...)
+		} else {
+			output, err = c.context.Executor.ExecuteCommandWithOutput(command, args...)
+		}
+	} else {
+		output, err = c.context.Executor.ExecuteCommandWithTimeout(c.timeout, command, args...)
 	}
 
 	return []byte(output), err
@@ -211,7 +197,7 @@ func (c *CephToolCommand) RunWithTimeout(timeout time.Duration) ([]byte, error) 
 // configured its arguments. It is future work to integrate this case into the
 // generalization.
 func ExecuteRBDCommandWithTimeout(context *clusterd.Context, args []string) (string, error) {
-	output, err := context.Executor.ExecuteCommandWithTimeout(exec.CephCommandTimeout, RBDTool, args...)
+	output, err := context.Executor.ExecuteCommandWithTimeout(exec.CephCommandsTimeout, RBDTool, args...)
 	return output, err
 }
 

@@ -23,12 +23,10 @@ import (
 
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/test"
-	"github.com/rook/rook/pkg/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/tevino/abool"
 	corev1 "k8s.io/api/core/v1"
@@ -36,6 +34,7 @@ import (
 	apiresource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
@@ -94,7 +93,7 @@ func Test_createNewOSDsFromStatus(t *testing.T) {
 
 	spec := cephv1.ClusterSpec{}
 	var status *OrchestrationStatus
-	awaitingStatusConfigMaps := util.NewSet()
+	awaitingStatusConfigMaps := sets.NewString()
 
 	var c *Cluster
 	var createConfig *createConfig
@@ -103,10 +102,10 @@ func Test_createNewOSDsFromStatus(t *testing.T) {
 		// none of this code should ever add or remove deployments from the existence list
 		assert.Equal(t, 3, deployments.Len())
 		// Simulate environment where provision jobs were created for node0, node2, pvc1, and pvc2
-		awaitingStatusConfigMaps = util.NewSet()
-		awaitingStatusConfigMaps.AddMultiple([]string{
+		awaitingStatusConfigMaps = sets.NewString()
+		awaitingStatusConfigMaps.Insert(
 			statusNameNode0, statusNameNode2,
-			statusNamePVC1, statusNamePVC2})
+			statusNamePVC1, statusNamePVC2)
 		createCallsOnNode = createCallsOnNode[:0]
 		createCallsOnPVC = createCallsOnPVC[:0]
 		errs = newProvisionErrors()
@@ -129,9 +128,9 @@ func Test_createNewOSDsFromStatus(t *testing.T) {
 		assert.Len(t, createCallsOnNode, 0)
 		assert.Len(t, createCallsOnPVC, 0)
 		// status map should have been marked completed
-		assert.Equal(t, 4, awaitingStatusConfigMaps.Count())
-		assert.Equal(t, 1, createConfig.finishedStatusConfigMaps.Count())
-		assert.True(t, createConfig.finishedStatusConfigMaps.Contains(statusNameNode0))
+		assert.Equal(t, 4, awaitingStatusConfigMaps.Len())
+		assert.Equal(t, 1, createConfig.finishedStatusConfigMaps.Len())
+		assert.True(t, createConfig.finishedStatusConfigMaps.Has(statusNameNode0))
 	})
 
 	t.Run("test: node: create all OSDs on node when all do not exist", func(t *testing.T) {
@@ -147,9 +146,9 @@ func Test_createNewOSDsFromStatus(t *testing.T) {
 		assert.ElementsMatch(t, createCallsOnNode, []int{0, 1, 2})
 		assert.Len(t, createCallsOnPVC, 0)
 		// status map should have been marked completed
-		assert.Equal(t, 4, awaitingStatusConfigMaps.Count())
-		assert.Equal(t, 1, createConfig.finishedStatusConfigMaps.Count())
-		assert.True(t, createConfig.finishedStatusConfigMaps.Contains(statusNameNode2))
+		assert.Equal(t, 4, awaitingStatusConfigMaps.Len())
+		assert.Equal(t, 1, createConfig.finishedStatusConfigMaps.Len())
+		assert.True(t, createConfig.finishedStatusConfigMaps.Has(statusNameNode2))
 	})
 
 	t.Run("node: create only nonexistent OSDs on node when some already exist", func(t *testing.T) {
@@ -168,9 +167,9 @@ func Test_createNewOSDsFromStatus(t *testing.T) {
 		assert.ElementsMatch(t, createCallsOnNode, []int{5, 7})
 		assert.Len(t, createCallsOnPVC, 0)
 		// status map should have been marked completed
-		assert.Equal(t, 4, awaitingStatusConfigMaps.Count())
-		assert.Equal(t, 1, createConfig.finishedStatusConfigMaps.Count())
-		assert.True(t, createConfig.finishedStatusConfigMaps.Contains(statusNameNode0))
+		assert.Equal(t, 4, awaitingStatusConfigMaps.Len())
+		assert.Equal(t, 1, createConfig.finishedStatusConfigMaps.Len())
+		assert.True(t, createConfig.finishedStatusConfigMaps.Has(statusNameNode0))
 	})
 
 	t.Run("node: skip creating OSDs for status configmaps that weren't created for this reconcile", func(t *testing.T) {
@@ -186,8 +185,8 @@ func Test_createNewOSDsFromStatus(t *testing.T) {
 		assert.ElementsMatch(t, createCallsOnNode, []int{})
 		assert.Len(t, createCallsOnPVC, 0)
 		// status map should NOT have been marked completed
-		assert.Equal(t, 4, awaitingStatusConfigMaps.Count())
-		assert.Equal(t, 0, createConfig.finishedStatusConfigMaps.Count())
+		assert.Equal(t, 4, awaitingStatusConfigMaps.Len())
+		assert.Equal(t, 0, createConfig.finishedStatusConfigMaps.Len())
 	})
 
 	t.Run("node: errors reported if OSDs fail to create", func(t *testing.T) {
@@ -204,9 +203,9 @@ func Test_createNewOSDsFromStatus(t *testing.T) {
 		assert.ElementsMatch(t, createCallsOnNode, []int{0, 1, 2})
 		assert.Len(t, createCallsOnPVC, 0)
 		// status map should have been marked completed
-		assert.Equal(t, 4, awaitingStatusConfigMaps.Count())
-		assert.Equal(t, 1, createConfig.finishedStatusConfigMaps.Count())
-		assert.True(t, createConfig.finishedStatusConfigMaps.Contains(statusNameNode0))
+		assert.Equal(t, 4, awaitingStatusConfigMaps.Len())
+		assert.Equal(t, 1, createConfig.finishedStatusConfigMaps.Len())
+		assert.True(t, createConfig.finishedStatusConfigMaps.Has(statusNameNode0))
 		induceFailureCreatingOSD = -1 // off
 	})
 
@@ -221,9 +220,9 @@ func Test_createNewOSDsFromStatus(t *testing.T) {
 		assert.Len(t, createCallsOnNode, 0)
 		assert.Len(t, createCallsOnPVC, 0)
 		// status map should have been marked completed
-		assert.Equal(t, 4, awaitingStatusConfigMaps.Count())
-		assert.Equal(t, 1, createConfig.finishedStatusConfigMaps.Count())
-		assert.True(t, createConfig.finishedStatusConfigMaps.Contains(statusNamePVC1))
+		assert.Equal(t, 4, awaitingStatusConfigMaps.Len())
+		assert.Equal(t, 1, createConfig.finishedStatusConfigMaps.Len())
+		assert.True(t, createConfig.finishedStatusConfigMaps.Has(statusNamePVC1))
 	})
 
 	t.Run("pvc: create all OSDs on pvc when all do not exist", func(t *testing.T) {
@@ -239,9 +238,9 @@ func Test_createNewOSDsFromStatus(t *testing.T) {
 		assert.ElementsMatch(t, createCallsOnPVC, []int{0, 1, 2})
 		assert.Len(t, createCallsOnNode, 0)
 		// status map should have been marked completed
-		assert.Equal(t, 4, awaitingStatusConfigMaps.Count())
-		assert.Equal(t, 1, createConfig.finishedStatusConfigMaps.Count())
-		assert.True(t, createConfig.finishedStatusConfigMaps.Contains(statusNamePVC2))
+		assert.Equal(t, 4, awaitingStatusConfigMaps.Len())
+		assert.Equal(t, 1, createConfig.finishedStatusConfigMaps.Len())
+		assert.True(t, createConfig.finishedStatusConfigMaps.Has(statusNamePVC2))
 	})
 
 	t.Run("pvc: create only nonexistent OSDs on pvc when some already exist", func(t *testing.T) {
@@ -260,9 +259,9 @@ func Test_createNewOSDsFromStatus(t *testing.T) {
 		assert.ElementsMatch(t, createCallsOnPVC, []int{5, 7})
 		assert.Len(t, createCallsOnNode, 0)
 		// status map should have been marked completed
-		assert.Equal(t, 4, awaitingStatusConfigMaps.Count())
-		assert.Equal(t, 1, createConfig.finishedStatusConfigMaps.Count())
-		assert.True(t, createConfig.finishedStatusConfigMaps.Contains(statusNamePVC1))
+		assert.Equal(t, 4, awaitingStatusConfigMaps.Len())
+		assert.Equal(t, 1, createConfig.finishedStatusConfigMaps.Len())
+		assert.True(t, createConfig.finishedStatusConfigMaps.Has(statusNamePVC1))
 	})
 
 	t.Run("pvc: skip creating OSDs for status configmaps that weren't created for this reconcile", func(t *testing.T) {
@@ -278,8 +277,8 @@ func Test_createNewOSDsFromStatus(t *testing.T) {
 		assert.ElementsMatch(t, createCallsOnPVC, []int{})
 		assert.Len(t, createCallsOnNode, 0)
 		// no status maps should have been marked completed
-		assert.Equal(t, 4, awaitingStatusConfigMaps.Count())
-		assert.Equal(t, 0, createConfig.finishedStatusConfigMaps.Count())
+		assert.Equal(t, 4, awaitingStatusConfigMaps.Len())
+		assert.Equal(t, 0, createConfig.finishedStatusConfigMaps.Len())
 	})
 
 	t.Run("pvc: errors reported if OSDs fail to create", func(t *testing.T) {
@@ -296,9 +295,9 @@ func Test_createNewOSDsFromStatus(t *testing.T) {
 		assert.ElementsMatch(t, createCallsOnPVC, []int{0, 1, 2})
 		assert.Len(t, createCallsOnNode, 0)
 		// status map should have been marked completed
-		assert.Equal(t, 4, awaitingStatusConfigMaps.Count())
-		assert.Equal(t, 1, createConfig.finishedStatusConfigMaps.Count())
-		assert.True(t, createConfig.finishedStatusConfigMaps.Contains(statusNamePVC1))
+		assert.Equal(t, 4, awaitingStatusConfigMaps.Len())
+		assert.Equal(t, 1, createConfig.finishedStatusConfigMaps.Len())
+		assert.True(t, createConfig.finishedStatusConfigMaps.Has(statusNamePVC1))
 		induceFailureCreatingOSD = -1 // off
 	})
 }
@@ -324,7 +323,7 @@ func Test_startProvisioningOverPVCs(t *testing.T) {
 	var errs *provisionErrors
 	var c *Cluster
 	var config *provisionConfig
-	var awaitingStatusConfigMaps *util.Set
+	var awaitingStatusConfigMaps sets.String
 	var err error
 	doSetup := func() {
 		test.SetFakeKubernetesVersion(clientset, fakeK8sVersion) // PVCs require k8s version v1.13+
@@ -342,7 +341,7 @@ func Test_startProvisioningOverPVCs(t *testing.T) {
 		doSetup()
 		awaitingStatusConfigMaps, err = c.startProvisioningOverPVCs(config, errs)
 		assert.NoError(t, err)
-		assert.Zero(t, awaitingStatusConfigMaps.Count())
+		assert.Zero(t, awaitingStatusConfigMaps.Len())
 		assert.Zero(t, errs.len())
 		// no result configmaps should have been created
 		cms, err := clientset.CoreV1().ConfigMaps(namespace).List(context.TODO(), metav1.ListOptions{})
@@ -352,8 +351,8 @@ func Test_startProvisioningOverPVCs(t *testing.T) {
 
 	t.Run("do nothing if device set count is zero", func(t *testing.T) {
 		spec = cephv1.ClusterSpec{
-			Storage: rookv1.StorageScopeSpec{
-				StorageClassDeviceSets: []rookv1.StorageClassDeviceSet{
+			Storage: cephv1.StorageScopeSpec{
+				StorageClassDeviceSets: []cephv1.StorageClassDeviceSet{
 					{
 						Name:  "set1",
 						Count: 0,
@@ -367,7 +366,7 @@ func Test_startProvisioningOverPVCs(t *testing.T) {
 		doSetup()
 		awaitingStatusConfigMaps, err = c.startProvisioningOverPVCs(config, errs)
 		assert.NoError(t, err)
-		assert.Zero(t, awaitingStatusConfigMaps.Count())
+		assert.Zero(t, awaitingStatusConfigMaps.Len())
 		assert.Zero(t, errs.len()) // this was not a problem with a single job but with ALL jobs
 		// no result configmaps should have been created
 		cms, err := clientset.CoreV1().ConfigMaps(namespace).List(context.TODO(), metav1.ListOptions{})
@@ -377,8 +376,8 @@ func Test_startProvisioningOverPVCs(t *testing.T) {
 
 	t.Run("one device set with 2 PVCs", func(t *testing.T) {
 		spec = cephv1.ClusterSpec{
-			Storage: rookv1.StorageScopeSpec{
-				StorageClassDeviceSets: []rookv1.StorageClassDeviceSet{
+			Storage: cephv1.StorageScopeSpec{
+				StorageClassDeviceSets: []cephv1.StorageClassDeviceSet{
 					{
 						Name:  "set1",
 						Count: 2,
@@ -392,7 +391,7 @@ func Test_startProvisioningOverPVCs(t *testing.T) {
 		doSetup()
 		awaitingStatusConfigMaps, err = c.startProvisioningOverPVCs(config, errs)
 		assert.NoError(t, err)
-		assert.Equal(t, 2, awaitingStatusConfigMaps.Count())
+		assert.Equal(t, 2, awaitingStatusConfigMaps.Len())
 		assert.Zero(t, errs.len())
 		cms, err := clientset.CoreV1().ConfigMaps(namespace).List(context.TODO(), metav1.ListOptions{})
 		assert.NoError(t, err)
@@ -404,7 +403,7 @@ func Test_startProvisioningOverPVCs(t *testing.T) {
 		doSetup()
 		awaitingStatusConfigMaps, err = c.startProvisioningOverPVCs(config, errs)
 		assert.NoError(t, err)
-		assert.Equal(t, 2, awaitingStatusConfigMaps.Count())
+		assert.Equal(t, 2, awaitingStatusConfigMaps.Len())
 		assert.Zero(t, errs.len())
 		cms, err := clientset.CoreV1().ConfigMaps(namespace).List(context.TODO(), metav1.ListOptions{})
 		assert.NoError(t, err)
@@ -418,7 +417,7 @@ func Test_startProvisioningOverPVCs(t *testing.T) {
 		doSetup()
 		awaitingStatusConfigMaps, err = c.startProvisioningOverPVCs(config, errs)
 		assert.NoError(t, err)
-		assert.Equal(t, 0, awaitingStatusConfigMaps.Count())
+		assert.Equal(t, 0, awaitingStatusConfigMaps.Len())
 		assert.Equal(t, 1, errs.len())
 		cms, err := clientset.CoreV1().ConfigMaps(namespace).List(context.TODO(), metav1.ListOptions{})
 		assert.NoError(t, err)
@@ -434,14 +433,14 @@ func Test_startProvisioningOverPVCs(t *testing.T) {
 		awaitingStatusConfigMaps, err = c.startProvisioningOverPVCs(config, errs)
 		assert.Error(t, err)
 		assert.Zero(t, errs.len())
-		assert.Zero(t, awaitingStatusConfigMaps.Count())
+		assert.Zero(t, awaitingStatusConfigMaps.Len())
 		requestCancelOrchestration.UnSet()
 	})
 
 	t.Run("error if no volume claim template", func(t *testing.T) {
 		spec = cephv1.ClusterSpec{
-			Storage: rookv1.StorageScopeSpec{
-				StorageClassDeviceSets: []rookv1.StorageClassDeviceSet{
+			Storage: cephv1.StorageScopeSpec{
+				StorageClassDeviceSets: []cephv1.StorageClassDeviceSet{
 					{
 						Name:                 "set1",
 						Count:                2,
@@ -454,7 +453,7 @@ func Test_startProvisioningOverPVCs(t *testing.T) {
 		doSetup()
 		awaitingStatusConfigMaps, err = c.startProvisioningOverPVCs(config, errs)
 		assert.NoError(t, err)
-		assert.Equal(t, 0, awaitingStatusConfigMaps.Count())
+		assert.Equal(t, 0, awaitingStatusConfigMaps.Len())
 		assert.Equal(t, 1, errs.len())
 		cms, err := clientset.CoreV1().ConfigMaps(namespace).List(context.TODO(), metav1.ListOptions{})
 		assert.NoError(t, err)
@@ -491,7 +490,7 @@ func Test_startProvisioningOverNodes(t *testing.T) {
 	var errs *provisionErrors
 	var c *Cluster
 	var config *provisionConfig
-	var prepareJobsRun *util.Set
+	var prepareJobsRun sets.String
 	var err error
 	var cms *corev1.ConfigMapList
 	doSetup := func() {
@@ -509,7 +508,7 @@ func Test_startProvisioningOverNodes(t *testing.T) {
 		doSetup()
 		prepareJobsRun, err = c.startProvisioningOverNodes(config, errs)
 		assert.NoError(t, err)
-		assert.Zero(t, prepareJobsRun.Count())
+		assert.Zero(t, prepareJobsRun.Len())
 		assert.Zero(t, errs.len())
 		// no result configmaps should have been created
 		cms, err = clientset.CoreV1().ConfigMaps(namespace).List(context.TODO(), metav1.ListOptions{})
@@ -521,9 +520,9 @@ func Test_startProvisioningOverNodes(t *testing.T) {
 		useAllDevices = true
 		spec = cephv1.ClusterSpec{
 			// this storage spec should cause prepare jobs to run on all (3) nodes
-			Storage: rookv1.StorageScopeSpec{
+			Storage: cephv1.StorageScopeSpec{
 				UseAllNodes: true,
-				Selection: rookv1.Selection{
+				Selection: cephv1.Selection{
 					UseAllDevices: &useAllDevices,
 				},
 			},
@@ -533,7 +532,7 @@ func Test_startProvisioningOverNodes(t *testing.T) {
 		doSetup()
 		prepareJobsRun, err = c.startProvisioningOverNodes(config, errs)
 		assert.NoError(t, err)
-		assert.Zero(t, prepareJobsRun.Count())
+		assert.Zero(t, prepareJobsRun.Len())
 		assert.Equal(t, 1, errs.len()) // this was not a problem with a single job but with ALL jobs
 		// no result configmaps should have been created
 		cms, err = clientset.CoreV1().ConfigMaps(namespace).List(context.TODO(), metav1.ListOptions{})
@@ -550,7 +549,7 @@ func Test_startProvisioningOverNodes(t *testing.T) {
 		assert.Zero(t, errs.len())
 		assert.ElementsMatch(t,
 			[]string{statusNameNode0, statusNameNode1, statusNameNode2},
-			prepareJobsRun.ToSlice(),
+			prepareJobsRun.List(),
 		)
 		// all result configmaps should have been created
 		cms, err = clientset.CoreV1().ConfigMaps(namespace).List(context.TODO(), metav1.ListOptions{})
@@ -560,7 +559,7 @@ func Test_startProvisioningOverNodes(t *testing.T) {
 
 	t.Run("use all nodes and devices when useAllNodes and individual nodes are both set", func(t *testing.T) {
 		// this also tests that jobs that currently exist (created in previous test) are handled
-		spec.Storage.Nodes = []rookv1.Node{
+		spec.Storage.Nodes = []cephv1.Node{
 			{Name: "node0"}, {Name: "node2"},
 		}
 		doSetup()
@@ -569,7 +568,7 @@ func Test_startProvisioningOverNodes(t *testing.T) {
 		assert.Zero(t, errs.len())
 		assert.ElementsMatch(t,
 			[]string{statusNameNode0, statusNameNode1, statusNameNode2},
-			prepareJobsRun.ToSlice(),
+			prepareJobsRun.List(),
 		)
 	})
 
@@ -577,14 +576,14 @@ func Test_startProvisioningOverNodes(t *testing.T) {
 		// this also tests that existing status configmaps (from the previous tests) don't affect the
 		// reported status configmaps from this run
 		spec = cephv1.ClusterSpec{
-			Storage: rookv1.StorageScopeSpec{
+			Storage: cephv1.StorageScopeSpec{
 				UseAllNodes: false,
-				Nodes: []rookv1.Node{
+				Nodes: []cephv1.Node{
 					// run on only node0 and node2
 					{Name: "node0"},
 					{Name: "node2"},
 				},
-				Selection: rookv1.Selection{
+				Selection: cephv1.Selection{
 					UseAllDevices: &useAllDevices,
 				},
 			},
@@ -596,7 +595,7 @@ func Test_startProvisioningOverNodes(t *testing.T) {
 		assert.Zero(t, errs.len())
 		assert.ElementsMatch(t,
 			[]string{statusNameNode0, statusNameNode2},
-			prepareJobsRun.ToSlice(),
+			prepareJobsRun.List(),
 		)
 	})
 
@@ -606,18 +605,18 @@ func Test_startProvisioningOverNodes(t *testing.T) {
 		prepareJobsRun, err = c.startProvisioningOverNodes(config, errs)
 		assert.Error(t, err)
 		assert.Zero(t, errs.len())
-		assert.Zero(t, prepareJobsRun.Count())
+		assert.Zero(t, prepareJobsRun.Len())
 		requestCancelOrchestration.UnSet()
 	})
 
 	t.Run("use no nodes", func(t *testing.T) {
 		spec = cephv1.ClusterSpec{
-			Storage: rookv1.StorageScopeSpec{
+			Storage: cephv1.StorageScopeSpec{
 				UseAllNodes: false,
-				Nodes:       []rookv1.Node{
+				Nodes:       []cephv1.Node{
 					// empty
 				},
-				Selection: rookv1.Selection{
+				Selection: cephv1.Selection{
 					UseAllDevices: &useAllDevices,
 				},
 			},
@@ -627,19 +626,19 @@ func Test_startProvisioningOverNodes(t *testing.T) {
 		prepareJobsRun, err = c.startProvisioningOverNodes(config, errs)
 		assert.NoError(t, err)
 		assert.Zero(t, errs.len())
-		assert.Zero(t, prepareJobsRun.Count())
+		assert.Zero(t, prepareJobsRun.Len())
 	})
 
 	t.Run("failures running prepare jobs", func(t *testing.T) {
 		spec = cephv1.ClusterSpec{
-			Storage: rookv1.StorageScopeSpec{
+			Storage: cephv1.StorageScopeSpec{
 				UseAllNodes: false,
-				Nodes: []rookv1.Node{
+				Nodes: []cephv1.Node{
 					// run on only node0 and node2
 					{Name: "node0"},
 					{Name: "node2"},
 				},
-				Selection: rookv1.Selection{
+				Selection: cephv1.Selection{
 					UseAllDevices: &useAllDevices,
 				},
 			},
@@ -672,13 +671,13 @@ func Test_startProvisioningOverNodes(t *testing.T) {
 		assert.Equal(t, 1, errs.len())
 		assert.ElementsMatch(t,
 			[]string{statusNameNode0},
-			prepareJobsRun.ToSlice(),
+			prepareJobsRun.List(),
 		)
 		// with a fresh clientset, only the one results ConfigMap should exist
 		cms, err = clientset.CoreV1().ConfigMaps(namespace).List(context.TODO(), metav1.ListOptions{})
 		assert.NoError(t, err)
 		assert.Len(t, cms.Items, 1)
-		assert.Equal(t, prepareJobsRun.ToSlice()[0], cms.Items[0].Name)
+		assert.Equal(t, prepareJobsRun.List()[0], cms.Items[0].Name)
 	})
 }
 

@@ -41,8 +41,8 @@ type CephManifests interface {
 	GetFilesystem(name string, activeCount int) string
 	GetNFS(name, pool string, daemonCount int) string
 	GetRBDMirror(name string, daemonCount int) string
-	GetObjectStore(name string, replicaCount, port int) string
-	GetObjectStoreUser(name, displayName, store string) string
+	GetObjectStore(name string, replicaCount, port int, tlsEnable bool) string
+	GetObjectStoreUser(name, displayName, store, usercaps, maxsize string, maxbuckets, maxobjects int) string
 	GetBucketStorageClass(storeName, storageClassName, reclaimPolicy, region string) string
 	GetOBC(obcName, storageClassName, bucketName string, maxObject string, createBucket bool) string
 	GetClient(name string, caps map[string]string) string
@@ -58,8 +58,8 @@ func NewCephManifests(settings *TestCephSettings) CephManifests {
 	switch settings.RookVersion {
 	case LocalBuildTag:
 		return &CephManifestsMaster{settings}
-	case Version1_5:
-		return &CephManifestsV1_5{settings}
+	case Version1_6:
+		return &CephManifestsV1_6{settings}
 	}
 	panic(fmt.Errorf("unrecognized ceph manifest version: %s", settings.RookVersion))
 }
@@ -275,7 +275,8 @@ spec:
     size: ` + replicaSize + `
     targetSizeRatio: .5
     requireSafeReplicaSize: false
-  compressionMode: aggressive
+  parameters:
+    compression_mode: aggressive
   mirroring:
     enabled: true
     mode: image
@@ -380,7 +381,34 @@ spec:
     active: ` + strconv.Itoa(count)
 }
 
-func (m *CephManifestsMaster) GetObjectStore(name string, replicaCount, port int) string {
+func (m *CephManifestsMaster) GetObjectStore(name string, replicaCount, port int, tlsEnable bool) string {
+	if tlsEnable {
+		return `apiVersion: ceph.rook.io/v1
+kind: CephObjectStore
+metadata:
+  name: ` + name + `
+  namespace: ` + m.settings.Namespace + `
+spec:
+  metadataPool:
+    replicated:
+      size: 1
+      requireSafeReplicaSize: false
+    compressionMode: passive
+  dataPool:
+    replicated:
+      size: 1
+      requireSafeReplicaSize: false
+  gateway:
+    type: s3
+    securePort: ` + strconv.Itoa(port) + `
+    instances: ` + strconv.Itoa(replicaCount) + `
+    sslCertificateRef: ` + name + `
+  healthCheck:
+    bucket:
+      disabled: false
+      interval: 10s
+`
+	}
 	return `apiVersion: ceph.rook.io/v1
 kind: CephObjectStore
 metadata:
@@ -402,11 +430,11 @@ spec:
   healthCheck:
     bucket:
       disabled: false
-      interval: 10s
+      interval: 5s
 `
 }
 
-func (m *CephManifestsMaster) GetObjectStoreUser(name string, displayName string, store string) string {
+func (m *CephManifestsMaster) GetObjectStoreUser(name, displayName, store, usercaps, maxsize string, maxbuckets, maxobjects int) string {
 	return `apiVersion: ceph.rook.io/v1
 kind: CephObjectStoreUser
 metadata:
@@ -414,7 +442,13 @@ metadata:
   namespace: ` + m.settings.Namespace + `
 spec:
   displayName: ` + displayName + `
-  store: ` + store
+  store: ` + store + `
+  quotas:
+    maxBuckets: ` + strconv.Itoa(maxbuckets) + `
+    maxObjects: ` + strconv.Itoa(maxobjects) + `
+    maxSize: ` + maxsize + `
+  capabilities:
+    user: ` + usercaps
 }
 
 //GetBucketStorageClass returns the manifest to create object bucket

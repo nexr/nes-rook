@@ -21,7 +21,7 @@ import (
 	"testing"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
+	"github.com/rook/rook/pkg/apis/rook.io"
 	"github.com/rook/rook/pkg/clusterd"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/ceph/config"
@@ -52,7 +52,7 @@ func testPodSpec(t *testing.T, monID string, pvc bool) {
 		&sync.Mutex{},
 	)
 	setCommonMonProperties(c, 0, cephv1.MonSpec{Count: 3, AllowMultiplePerNode: true}, "rook/rook:myversion")
-	c.spec.CephVersion = cephv1.CephVersionSpec{Image: "ceph/ceph:myceph"}
+	c.spec.CephVersion = cephv1.CephVersionSpec{Image: "quay.io/ceph/ceph:myceph"}
 	c.spec.Resources = map[string]v1.ResourceRequirements{}
 	c.spec.Resources["mon"] = v1.ResourceRequirements{
 		Limits: v1.ResourceList{
@@ -64,7 +64,7 @@ func testPodSpec(t *testing.T, monID string, pvc bool) {
 			v1.ResourceMemory: *resource.NewQuantity(500.0, resource.BinarySI),
 		},
 	}
-	c.spec.PriorityClassNames = map[rookv1.KeyType]string{
+	c.spec.PriorityClassNames = map[rook.KeyType]string{
 		cephv1.KeyMon: "my-priority-class",
 	}
 	monConfig := testGenMonConfig(monID)
@@ -86,7 +86,7 @@ func testPodSpec(t *testing.T, monID string, pvc bool) {
 		config.MonType, monID, AppName, "ns")
 
 	podTemplate := test.NewPodTemplateSpecTester(t, &d.Spec.Template)
-	podTemplate.RunFullSuite(config.MonType, monID, AppName, "ns", "ceph/ceph:myceph",
+	podTemplate.RunFullSuite(config.MonType, monID, AppName, "ns", "quay.io/ceph/ceph:myceph",
 		"200", "100", "1337", "500", /* resources */
 		"my-priority-class")
 }
@@ -102,7 +102,7 @@ func TestDeploymentPVCSpec(t *testing.T) {
 		&sync.Mutex{},
 	)
 	setCommonMonProperties(c, 0, cephv1.MonSpec{Count: 3, AllowMultiplePerNode: true}, "rook/rook:myversion")
-	c.spec.CephVersion = cephv1.CephVersionSpec{Image: "ceph/ceph:myceph"}
+	c.spec.CephVersion = cephv1.CephVersionSpec{Image: "quay.io/ceph/ceph:myceph"}
 	c.spec.Resources = map[string]v1.ResourceRequirements{}
 	c.spec.Resources["mon"] = v1.ResourceRequirements{
 		Limits: v1.ResourceList{

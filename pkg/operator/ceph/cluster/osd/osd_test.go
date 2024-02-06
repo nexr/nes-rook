@@ -23,7 +23,6 @@ import (
 
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	fakeclient "github.com/rook/rook/pkg/client/clientset/versioned/fake"
 	"github.com/rook/rook/pkg/clusterd"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
@@ -133,7 +132,7 @@ func TestAddRemoveNode(t *testing.T) {
 	}()
 	// stub out the conditionExportFunc to do nothing. we do not have a fake Rook interface that
 	// allows us to interact with a CephCluster resource like the fake K8s clientset.
-	updateConditionFunc = func(c *clusterd.Context, namespaceName types.NamespacedName, conditionType cephv1.ConditionType, status corev1.ConditionStatus, reason cephv1.ClusterReasonType, message string) {
+	updateConditionFunc = func(c *clusterd.Context, namespaceName types.NamespacedName, conditionType cephv1.ConditionType, status corev1.ConditionStatus, reason cephv1.ConditionReason, message string) {
 		// do nothing
 	}
 
@@ -157,7 +156,7 @@ func TestAddRemoveNode(t *testing.T) {
 	clusterInfo.OwnerInfo = cephclient.NewMinimumOwnerInfo(t)
 	generateKey := "expected key"
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command string, outFileArg string, args ...string) (string, error) {
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			return "{\"key\": \"" + generateKey + "\"}", nil
 		},
 	}
@@ -171,12 +170,12 @@ func TestAddRemoveNode(t *testing.T) {
 	}
 	spec := cephv1.ClusterSpec{
 		DataDirHostPath: context.ConfigDir,
-		Storage: rookv1.StorageScopeSpec{
-			Nodes: []rookv1.Node{
+		Storage: cephv1.StorageScopeSpec{
+			Nodes: []cephv1.Node{
 				{
 					Name: nodeName,
-					Selection: rookv1.Selection{
-						Devices: []rookv1.Device{{Name: "sdx"}},
+					Selection: cephv1.Selection{
+						Devices: []cephv1.Device{{Name: "sdx"}},
 					},
 				},
 			},
@@ -210,7 +209,7 @@ func TestAddRemoveNode(t *testing.T) {
 
 	// mock the ceph calls that will be called during remove node
 	context.Executor = &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command, outputFile string, args ...string) (string, error) {
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			logger.Infof("Command: %s %v", command, args)
 			if args[0] == "status" {
 				return `{"pgmap":{"num_pgs":100,"pgs_by_state":[{"state_name":"active+clean","count":100}]}}`, nil
@@ -272,7 +271,7 @@ func TestAddRemoveNode(t *testing.T) {
 	}
 
 	// modify the storage spec to remove the node from the cluster
-	spec.Storage.Nodes = []rookv1.Node{}
+	spec.Storage.Nodes = []cephv1.Node{}
 	c = New(context, clusterInfo, spec, "myversion")
 
 	// reset the orchestration status watcher
@@ -331,12 +330,12 @@ func TestAddNodeFailure(t *testing.T) {
 	context := &clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook", Executor: &exectest.MockExecutor{}, RequestCancelOrchestration: abool.New()}
 	spec := cephv1.ClusterSpec{
 		DataDirHostPath: context.ConfigDir,
-		Storage: rookv1.StorageScopeSpec{
-			Nodes: []rookv1.Node{
+		Storage: cephv1.StorageScopeSpec{
+			Nodes: []cephv1.Node{
 				{
 					Name: nodeName,
-					Selection: rookv1.Selection{
-						Devices: []rookv1.Device{{Name: "sdx"}},
+					Selection: cephv1.Selection{
+						Devices: []cephv1.Device{{Name: "sdx"}},
 					},
 				},
 			},
@@ -430,7 +429,7 @@ func TestGetOSDInfo(t *testing.T) {
 	osdProp := osdProperties{
 		crushHostname: node,
 		pvc:           corev1.PersistentVolumeClaimVolumeSource{ClaimName: "pvc"},
-		selection:     rookv1.Selection{},
+		selection:     cephv1.Selection{},
 		resources:     corev1.ResourceRequirements{},
 		storeConfig:   config.StoreConfig{},
 		portable:      true,
@@ -472,9 +471,9 @@ func TestGetOSDInfo(t *testing.T) {
 		osd5 := OSDInfo{ID: 3, UUID: "osd-uuid", BlockPath: "vg1/lv1", CVMode: "lvm"}
 		osdProp = osdProperties{
 			crushHostname: node,
-			devices:       []rookv1.Device{},
+			devices:       []cephv1.Device{},
 			pvc:           corev1.PersistentVolumeClaimVolumeSource{},
-			selection: rookv1.Selection{
+			selection: cephv1.Selection{
 				UseAllDevices: &useAllDevices,
 			},
 			resources:      corev1.ResourceRequirements{},
@@ -501,7 +500,7 @@ func TestGetPreparePlacement(t *testing.T) {
 	assert.Nil(t, result.NodeAffinity)
 
 	// the osd daemon placement is specified
-	prop.placement = rookv1.Placement{NodeAffinity: &corev1.NodeAffinity{
+	prop.placement = cephv1.Placement{NodeAffinity: &corev1.NodeAffinity{
 		RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
 			NodeSelectorTerms: []corev1.NodeSelectorTerm{
 				{
@@ -523,7 +522,7 @@ func TestGetPreparePlacement(t *testing.T) {
 	assert.Equal(t, "label1", result.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[0].MatchExpressions[0].Key)
 
 	// The prepare placement is specified and takes precedence over the osd placement
-	prop.preparePlacement = &rookv1.Placement{NodeAffinity: &corev1.NodeAffinity{
+	prop.preparePlacement = &cephv1.Placement{NodeAffinity: &corev1.NodeAffinity{
 		RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
 			NodeSelectorTerms: []corev1.NodeSelectorTerm{
 				{
@@ -593,7 +592,7 @@ func TestGetOSDInfoWithCustomRoot(t *testing.T) {
 	context := &clusterd.Context{}
 	spec := cephv1.ClusterSpec{
 		DataDirHostPath: "/rook",
-		Storage: rookv1.StorageScopeSpec{
+		Storage: cephv1.StorageScopeSpec{
 			Config: map[string]string{
 				"crushRoot": "custom-root",
 			},
@@ -609,7 +608,7 @@ func TestGetOSDInfoWithCustomRoot(t *testing.T) {
 	osdProp := osdProperties{
 		crushHostname: node,
 		pvc:           corev1.PersistentVolumeClaimVolumeSource{ClaimName: "pvc"},
-		selection:     rookv1.Selection{},
+		selection:     cephv1.Selection{},
 		resources:     corev1.ResourceRequirements{},
 		storeConfig:   config.StoreConfig{},
 	}

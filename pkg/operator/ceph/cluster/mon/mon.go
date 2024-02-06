@@ -33,7 +33,6 @@ import (
 	"github.com/coreos/pkg/capnslog"
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	cephutil "github.com/rook/rook/pkg/daemon/ceph/util"
@@ -310,10 +309,6 @@ func (c *Cluster) startMons(targetCount int) error {
 }
 
 func (c *Cluster) configureStretchCluster(mons []*monConfig) error {
-	if err := c.assignStretchMonsToZones(mons); err != nil {
-		return errors.Wrap(err, "failed to assign mons to zones")
-	}
-
 	// Enable the mon connectivity strategy
 	if err := cephclient.EnableStretchElectionStrategy(c.context, c.ClusterInfo); err != nil {
 		return errors.Wrap(err, "failed to enable stretch cluster")
@@ -343,45 +338,6 @@ func (c *Cluster) isArbiterZone(zone string) bool {
 	return c.getArbiterZone() == zone
 }
 
-func (c *Cluster) assignStretchMonsToZones(mons []*monConfig) error {
-	arbiterZone := c.getArbiterZone()
-
-	// Get the mon dump to see if the zones are already applied to the mons
-	monDump, err := cephclient.GetMonDump(c.context, c.ClusterInfo)
-	if err != nil {
-		return errors.Wrap(err, "failed to detect if stretch mons are already assigned to zones")
-	}
-
-	// Set the location for each mon
-	domainName := c.stretchFailureDomainName()
-	for _, mon := range mons {
-		if mon.Zone == arbiterZone {
-			// remember the arbiter mon to be set later in the reconcile after the OSDs are configured
-			c.arbiterMon = mon.DaemonName
-		}
-		// Check if the zone is already set on the mon
-		alreadySet := false
-		for _, monInfo := range monDump.Mons {
-			if monInfo.Name == mon.DaemonName {
-				desiredLocation := fmt.Sprintf("{%s=%s}", domainName, mon.Zone)
-				if monInfo.CrushLocation == desiredLocation {
-					alreadySet = true
-				}
-				break
-			}
-		}
-		if alreadySet {
-			logger.Infof("mon %q stretch domain %q is already set to %q", mon.DaemonName, domainName, mon.Zone)
-			continue
-		}
-		logger.Infof("setting mon %q to stretch %s=%s", mon.DaemonName, domainName, mon.Zone)
-		if err := cephclient.SetMonStretchZone(c.context, c.ClusterInfo, mon.DaemonName, domainName, mon.Zone); err != nil {
-			return errors.Wrapf(err, "failed to set mon %q zone", mon.DaemonName)
-		}
-	}
-	return nil
-}
-
 func (c *Cluster) ConfigureArbiter() error {
 	if c.arbiterMon == "" {
 		return errors.New("arbiter not specified for the stretch cluster")
@@ -391,7 +347,21 @@ func (c *Cluster) ConfigureArbiter() error {
 	if err != nil {
 		logger.Warningf("attempting to enable arbiter after failed to detect if already enabled. %v", err)
 	} else if monDump.StretchMode {
-		logger.Infof("stretch mode is already enabled")
+		// only support arbiter failover if at least v16.2.7
+		if !c.ClusterInfo.CephVersion.IsAtLeast(arbiterFailoverSupportedCephVersion) {
+			logger.Info("stretch mode is already enabled")
+			return nil
+		}
+
+		if monDump.TiebreakerMon == c.arbiterMon {
+			logger.Infof("stretch mode is already enabled with tiebreaker %q", c.arbiterMon)
+			return nil
+		}
+		// Set the new mon tiebreaker
+		logger.Infof("updating tiebreaker mon from %q to %q", monDump.TiebreakerMon, c.arbiterMon)
+		if err := cephclient.SetNewTiebreaker(c.context, c.ClusterInfo, c.arbiterMon); err != nil {
+			return errors.Wrap(err, "failed to set new mon tiebreaker")
+		}
 		return nil
 	}
 
@@ -579,8 +549,7 @@ func (c *Cluster) clusterInfoToMonConfig(excludedMon string) []*monConfig {
 			Port:         cephutil.GetPortFromEndpoint(monitor.Endpoint),
 			PublicIP:     cephutil.GetIPFromEndpoint(monitor.Endpoint),
 			Zone:         zone,
-			DataPathMap: config.NewStatefulDaemonDataPathMap(
-				c.spec.DataDirHostPath, dataDirRelativeHostPath(monitor.Name), config.MonType, monitor.Name, c.Namespace),
+			DataPathMap:  config.NewStatefulDaemonDataPathMap(c.spec.DataDirHostPath, dataDirRelativeHostPath(monitor.Name), config.MonType, monitor.Name, c.Namespace),
 		})
 	}
 	return mons
@@ -725,12 +694,12 @@ func scheduleMonitor(c *Cluster, mon *monConfig) (*apps.Deployment, error) {
 }
 
 // GetMonPlacement returns the placement for the MON service
-func (c *Cluster) getMonPlacement(zone string) rookv1.Placement {
+func (c *Cluster) getMonPlacement(zone string) cephv1.Placement {
 	// If the mon is the arbiter in a stretch cluster and its placement is specified, return it
 	// without merging with the "all" placement so it can be handled separately from all other daemons
 	if c.isArbiterZone(zone) {
 		p := cephv1.GetArbiterPlacement(c.spec.Placement)
-		noPlacement := rookv1.Placement{}
+		noPlacement := cephv1.Placement{}
 		if !reflect.DeepEqual(p, noPlacement) {
 			// If the arbiter placement was specified, go ahead and use it.
 			return p

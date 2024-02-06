@@ -37,14 +37,21 @@ caps mon = "allow rw"
 caps osd = "allow rwx"
 `
 
-	certVolumeName                 = "rook-ceph-rgw-cert"
-	certDir                        = "/etc/ceph/private"
-	certKeyName                    = "cert"
-	certFilename                   = "rgw-cert.pem"
-	certKeyFileName                = "rgw-key.pem"
-	rgwPortInternalPort      int32 = 8080
-	ServiceServingCertCAFile       = "/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt"
-	HttpTimeOut                    = time.Second * 15
+	caBundleVolumeName              = "rook-ceph-custom-ca-bundle"
+	caBundleUpdatedVolumeName       = "rook-ceph-ca-bundle-updated"
+	caBundleTrustedDir              = "/etc/pki/ca-trust/"
+	caBundleSourceCustomDir         = caBundleTrustedDir + "source/anchors/"
+	caBundleExtractedDir            = caBundleTrustedDir + "extracted/"
+	caBundleKeyName                 = "cabundle"
+	caBundleFileName                = "custom-ca-bundle.crt"
+	certVolumeName                  = "rook-ceph-rgw-cert"
+	certDir                         = "/etc/ceph/private"
+	certKeyName                     = "cert"
+	certFilename                    = "rgw-cert.pem"
+	certKeyFileName                 = "rgw-key.pem"
+	rgwPortInternalPort       int32 = 8080
+	ServiceServingCertCAFile        = "/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt"
+	HttpTimeOut                     = time.Second * 15
 )
 
 var (
@@ -72,7 +79,7 @@ func (c *clusterConfig) portString() string {
 			portString = fmt.Sprintf("ssl_port=%d ssl_certificate=%s",
 				c.store.Spec.Gateway.SecurePort, certPath)
 		}
-		secretType, _ := c.rgwTLSSecretType()
+		secretType, _ := c.rgwTLSSecretType(c.store.Spec.Gateway.SSLCertificateRef)
 		if c.store.Spec.GetServiceServingCert() != "" || secretType == v1.SecretTypeTLS {
 			privateKey := path.Join(certDir, certKeyFileName)
 			portString = fmt.Sprintf("%s ssl_private_key=%s", portString, privateKey)
@@ -101,16 +108,16 @@ func (c *clusterConfig) generateKeyring(rgwConfig *rgwConfig) (string, error) {
 	return keyring, s.CreateOrUpdate(rgwConfig.ResourceName, keyring)
 }
 
-func (c *clusterConfig) setDefaultFlagsMonConfigStore(rgwName string) error {
+func (c *clusterConfig) setDefaultFlagsMonConfigStore(rgwConfig *rgwConfig) error {
 	monStore := cephconfig.GetMonStore(c.context, c.clusterInfo)
-	who := generateCephXUser(rgwName)
+	who := generateCephXUser(rgwConfig.ResourceName)
 	configOptions := make(map[string]string)
 
 	configOptions["rgw_log_nonexistent_bucket"] = "true"
 	configOptions["rgw_log_object_name_utc"] = "true"
 	configOptions["rgw_enable_usage_log"] = "true"
-	configOptions["rgw_zone"] = c.store.Name
-	configOptions["rgw_zonegroup"] = c.store.Name
+	configOptions["rgw_zone"] = rgwConfig.Zone
+	configOptions["rgw_zonegroup"] = rgwConfig.ZoneGroup
 
 	for flag, val := range configOptions {
 		err := monStore.Set(who, flag, val)

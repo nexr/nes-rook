@@ -21,7 +21,9 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
+	"net/http"
 	"reflect"
+	"strconv"
 	"syscall"
 
 	"github.com/banzaicloud/k8s-objectmatcher/patch"
@@ -60,6 +62,10 @@ type rgwConfig struct {
 }
 
 var updateDeploymentAndWait = mon.UpdateCephDeploymentAndWait
+
+var (
+	insecureSkipVerify = "insecureSkipVerify"
+)
 
 func (c *clusterConfig) createOrUpdateStore(realmName, zoneGroupName, zoneName string) error {
 	logger.Infof("creating object store %q in namespace %q", c.store.Name, c.store.Namespace)
@@ -123,7 +129,7 @@ func (c *clusterConfig) startRGWPods(realmName, zoneGroupName, zoneName string) 
 		// Unfortunately, on upgrade we would not set the flags which is not ideal for old clusters where we were no setting those flags
 		// The KV supports setting those flags even if the RGW is running
 		logger.Info("setting rgw config flags")
-		err = c.setDefaultFlagsMonConfigStore(rgwConfig.ResourceName)
+		err = c.setDefaultFlagsMonConfigStore(rgwConfig)
 		if err != nil {
 			// Getting EPERM typically happens when the flag may not be modified at runtime
 			// This is fine to ignore
@@ -138,7 +144,7 @@ func (c *clusterConfig) startRGWPods(realmName, zoneGroupName, zoneName string) 
 		if err != nil {
 			return errors.Wrap(err, "failed to create rgw deployment")
 		}
-		logger.Infof("object store %q deployment %q started", c.store.Name, deployment.Name)
+		logger.Infof("object store %q deployment %q created", c.store.Name, deployment.Name)
 
 		// Set owner ref to cephObjectStore object
 		err = c.ownerInfo.SetControllerReference(deployment)
@@ -321,7 +327,8 @@ func BuildDNSEndpoint(domainName string, port int32, secure bool) string {
 }
 
 // GetTLSCACert fetch cacert for internal RGW requests
-func GetTlsCaCert(objContext *Context, objectStoreSpec *cephv1.ObjectStoreSpec) ([]byte, error) {
+func GetTlsCaCert(objContext *Context, objectStoreSpec *cephv1.ObjectStoreSpec) ([]byte, bool, error) {
+	var insecureTLS, ok bool
 	ctx := context.TODO()
 	var (
 		tlsCert []byte
@@ -331,19 +338,54 @@ func GetTlsCaCert(objContext *Context, objectStoreSpec *cephv1.ObjectStoreSpec) 
 	if objectStoreSpec.Gateway.SSLCertificateRef != "" {
 		tlsSecretCert, err := objContext.Context.Clientset.CoreV1().Secrets(objContext.clusterInfo.Namespace).Get(ctx, objectStoreSpec.Gateway.SSLCertificateRef, metav1.GetOptions{})
 		if err != nil {
-			return nil, errors.Wrapf(err, "failed to get secret %s containing TLS certificate defined in %s", objectStoreSpec.Gateway.SSLCertificateRef, objContext.Name)
+			return nil, false, errors.Wrapf(err, "failed to get secret %q containing TLS certificate defined in %q", objectStoreSpec.Gateway.SSLCertificateRef, objContext.Name)
 		}
 		if tlsSecretCert.Type == v1.SecretTypeOpaque {
-			tlsCert = tlsSecretCert.Data[certKeyName]
+			tlsCert, ok = tlsSecretCert.Data[certKeyName]
+			if !ok {
+				return nil, false, errors.Errorf("failed to get TLS certificate from secret, token is %q but key %q does not exist", v1.SecretTypeOpaque, certKeyName)
+			}
 		} else if tlsSecretCert.Type == v1.SecretTypeTLS {
-			tlsCert = tlsSecretCert.Data[v1.TLSCertKey]
+			tlsCert, ok = tlsSecretCert.Data[v1.TLSCertKey]
+			if !ok {
+				return nil, false, errors.Errorf("failed to get TLS certificate from secret, token is %q but key %q does not exist", v1.SecretTypeTLS, v1.TLSCertKey)
+			}
+		} else {
+			return nil, false, errors.Errorf("failed to get TLS certificate from secret, unknown secret type %q", tlsSecretCert.Type)
+		}
+		// If the secret contains an indication that the TLS connection should be insecure, then
+		// let's apply it to the client.
+		insecureTLSStr, ok := tlsSecretCert.Data[insecureSkipVerify]
+		if ok {
+			insecureTLS, err = strconv.ParseBool(string(insecureTLSStr))
+			if err != nil {
+				return nil, false, errors.Wrap(err, "failed to parse insecure tls bool option")
+			}
 		}
 	} else if objectStoreSpec.GetServiceServingCert() != "" {
 		tlsCert, err = ioutil.ReadFile(ServiceServingCertCAFile)
 		if err != nil {
-			return nil, errors.Wrapf(err, "failed to fetch TLS certificate from %q", ServiceServingCertCAFile)
+			return nil, false, errors.Wrapf(err, "failed to fetch TLS certificate from %q", ServiceServingCertCAFile)
 		}
 	}
 
-	return tlsCert, nil
+	return tlsCert, insecureTLS, nil
+}
+
+// Allow overriding this function for unit tests to mock the admin ops api
+var genObjectStoreHTTPClientFunc = genObjectStoreHTTPClient
+
+func genObjectStoreHTTPClient(objContext *Context, spec *cephv1.ObjectStoreSpec) (*http.Client, []byte, error) {
+	nsName := fmt.Sprintf("%s/%s", objContext.clusterInfo.Namespace, objContext.Name)
+	c := &http.Client{}
+	tlsCert := []byte{}
+	if spec.IsTLSEnabled() {
+		var err error
+		tlsCert, insecureTLS, err := GetTlsCaCert(objContext, spec)
+		if err != nil {
+			return nil, tlsCert, errors.Wrapf(err, "failed to fetch CA cert to establish TLS connection with object store %q", nsName)
+		}
+		c.Transport = BuildTransportTLS(tlsCert, insecureTLS)
+	}
+	return c, tlsCert, nil
 }

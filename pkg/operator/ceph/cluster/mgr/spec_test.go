@@ -20,7 +20,7 @@ import (
 	"testing"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
+	"github.com/rook/rook/pkg/apis/rook.io"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
@@ -39,11 +39,11 @@ func TestPodSpec(t *testing.T) {
 	clusterInfo := &cephclient.ClusterInfo{Namespace: "ns", FSID: "myfsid", OwnerInfo: ownerInfo}
 	clusterInfo.SetName("test")
 	clusterSpec := cephv1.ClusterSpec{
-		CephVersion:        cephv1.CephVersionSpec{Image: "ceph/ceph:myceph"},
+		CephVersion:        cephv1.CephVersionSpec{Image: "quay.io/ceph/ceph:myceph"},
 		Dashboard:          cephv1.DashboardSpec{Port: 1234},
-		PriorityClassNames: map[rookv1.KeyType]string{cephv1.KeyMgr: "my-priority-class"},
+		PriorityClassNames: map[rook.KeyType]string{cephv1.KeyMgr: "my-priority-class"},
 		DataDirHostPath:    "/var/lib/rook/",
-		Resources: rookv1.ResourceSpec{string(cephv1.KeyMgr): v1.ResourceRequirements{
+		Resources: cephv1.ResourceSpec{string(cephv1.KeyMgr): v1.ResourceRequirements{
 			Limits: v1.ResourceList{
 				v1.ResourceCPU:    *resource.NewQuantity(200.0, resource.BinarySI),
 				v1.ResourceMemory: *resource.NewQuantity(500.0, resource.BinarySI),
@@ -75,7 +75,7 @@ func TestPodSpec(t *testing.T) {
 		podTemplate.Spec().Containers().RequireAdditionalEnvVars(
 			"ROOK_OPERATOR_NAMESPACE", "ROOK_CEPH_CLUSTER_CRD_VERSION",
 			"ROOK_CEPH_CLUSTER_CRD_NAME")
-		podTemplate.RunFullSuite(config.MgrType, "a", AppName, "ns", "ceph/ceph:myceph",
+		podTemplate.RunFullSuite(config.MgrType, "a", AppName, "ns", "quay.io/ceph/ceph:myceph",
 			"200", "100", "500", "250", /* resources */
 			"my-priority-class")
 		assert.Equal(t, 2, len(d.Spec.Template.Annotations))
@@ -168,10 +168,10 @@ func TestApplyPrometheusAnnotations(t *testing.T) {
 	d, err = c.makeDeployment(&mgrTestConfig)
 	assert.NoError(t, err)
 
-	fakeAnnotations := rookv1.Annotations{
+	fakeAnnotations := rook.Annotations{
 		"foo.io/bar": "foobar",
 	}
-	c.spec.Annotations = map[rookv1.KeyType]rookv1.Annotations{cephv1.KeyMgr: fakeAnnotations}
+	c.spec.Annotations = map[rook.KeyType]rook.Annotations{cephv1.KeyMgr: fakeAnnotations}
 
 	c.applyPrometheusAnnotations(&d.ObjectMeta)
 	assert.Equal(t, 1, len(c.spec.Annotations))

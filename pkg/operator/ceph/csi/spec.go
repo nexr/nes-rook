@@ -64,7 +64,7 @@ type Param struct {
 	CephFSLivenessMetricsPort      uint16
 	RBDGRPCMetricsPort             uint16
 	RBDLivenessMetricsPort         uint16
-	ProvisionerReplicas            uint8
+	ProvisionerReplicas            int32
 	CSICephFSPodLabels             map[string]string
 	CSIRBDPodLabels                map[string]string
 }
@@ -108,12 +108,12 @@ var (
 // manually challenging.
 var (
 	// image names
-	DefaultCSIPluginImage         = "quay.io/cephcsi/cephcsi:v3.3.1"
-	DefaultRegistrarImage         = "k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.2.0"
-	DefaultProvisionerImage       = "k8s.gcr.io/sig-storage/csi-provisioner:v2.2.2"
-	DefaultAttacherImage          = "k8s.gcr.io/sig-storage/csi-attacher:v3.2.1"
-	DefaultSnapshotterImage       = "k8s.gcr.io/sig-storage/csi-snapshotter:v4.1.1"
-	DefaultResizerImage           = "k8s.gcr.io/sig-storage/csi-resizer:v1.2.0"
+	DefaultCSIPluginImage         = "quay.io/cephcsi/cephcsi:v3.4.0"
+	DefaultRegistrarImage         = "k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.3.0"
+	DefaultProvisionerImage       = "k8s.gcr.io/sig-storage/csi-provisioner:v3.0.0"
+	DefaultAttacherImage          = "k8s.gcr.io/sig-storage/csi-attacher:v3.3.0"
+	DefaultSnapshotterImage       = "k8s.gcr.io/sig-storage/csi-snapshotter:v4.2.0"
+	DefaultResizerImage           = "k8s.gcr.io/sig-storage/csi-resizer:v1.3.0"
 	DefaultVolumeReplicationImage = "quay.io/csiaddons/volumereplication-operator:v0.1.0"
 )
 
@@ -172,6 +172,9 @@ const (
 	detectCSIVersionName = "rook-ceph-csi-detect-version"
 	// default log level for csi containers
 	defaultLogLevel uint8 = 0
+
+	// default provisioner replicas
+	defaultProvisionerReplicas int32 = 2
 
 	// update strategy
 	rollingUpdate = "RollingUpdate"
@@ -313,13 +316,6 @@ func startDrivers(clientset kubernetes.Interface, rookclientset rookclient.Inter
 		return errors.Wrap(err, "failed to load CSI_PROVISIONER_PRIORITY_CLASSNAME setting")
 	}
 
-	// OMAP generator will be enabled by default
-	// If AllowUnsupported is set to false and if CSI version is less than
-	// <3.2.0 disable OMAP generator sidecar
-	if !v.SupportsOMAPController() {
-		tp.EnableOMAPGenerator = false
-	}
-
 	enableOMAPGenerator, err := k8sutil.GetOperatorSetting(clientset, controllerutil.OperatorSettingConfigMapName, "CSI_ENABLE_OMAP_GENERATOR", "false")
 	if err != nil {
 		return errors.Wrap(err, "failed to load CSI_ENABLE_OMAP_GENERATOR setting")
@@ -409,14 +405,26 @@ func startDrivers(clientset kubernetes.Interface, rookclientset rookclient.Inter
 		}
 	}
 
-	tp.ProvisionerReplicas = 2
+	tp.ProvisionerReplicas = defaultProvisionerReplicas
 	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err == nil {
 		if len(nodes.Items) == 1 {
 			tp.ProvisionerReplicas = 1
+		} else {
+			replicas, err := k8sutil.GetOperatorSetting(clientset, controllerutil.OperatorSettingConfigMapName, "CSI_PROVISIONER_REPLICAS", "2")
+			if err != nil {
+				logger.Warningf("failed to load CSI_PROVISIONER_REPLICAS. Defaulting to %d. %v", tp.ProvisionerReplicas, err)
+			} else {
+				r, err := strconv.ParseInt(replicas, 10, 32)
+				if err != nil {
+					logger.Errorf("failed to parse CSI_PROVISIONER_REPLICAS. Defaulting to %d. %v", tp.ProvisionerReplicas, err)
+				} else {
+					tp.ProvisionerReplicas = int32(r)
+				}
+			}
 		}
 	} else {
-		logger.Errorf("failed to get nodes. Defaulting the number of replicas of provisioner pods to 2. %v", err)
+		logger.Errorf("failed to get nodes. Defaulting the number of replicas of provisioner pods to %d. %v", tp.ProvisionerReplicas, err)
 	}
 
 	if EnableRBD {
@@ -612,7 +620,7 @@ func startDrivers(clientset kubernetes.Interface, rookclientset rookclient.Inter
 		if err != nil {
 			// logging a warning and intentionally continuing with the default
 			// log level
-			logger.Warningf("failed to parse CSI_CEPHFS_FSGROUPPOLICY. Defaulting to %q. %v", k8scsi.ReadWriteOnceWithFSTypeFSGroupPolicy, err)
+			logger.Warningf("failed to parse CSI_CEPHFS_FSGROUPPOLICY. Defaulting to %q. %v", k8scsi.NoneFSGroupPolicy, err)
 		}
 		err = csiDriverobj.createCSIDriverInfo(ctx, clientset, CephFSDriverName, fsGroupPolicyForCephFS)
 		if err != nil {
@@ -687,7 +695,7 @@ func applyCephClusterNetworkConfig(ctx context.Context, objectMeta *metav1.Objec
 	}
 	for _, cephCluster := range cephClusters.Items {
 		if cephCluster.Spec.Network.IsMultus() {
-			err = k8sutil.ApplyMultus(cephCluster.Spec.Network.NetworkSpec, objectMeta)
+			err = k8sutil.ApplyMultus(cephCluster.Spec.Network, objectMeta)
 			if err != nil {
 				return false, errors.Wrapf(err, "failed to apply multus configuration to CephCluster %q", cephCluster.Name)
 			}
@@ -718,8 +726,11 @@ func validateCSIVersion(clientset kubernetes.Interface, namespace, rookImage, se
 	job := versionReporter.Job()
 	job.Spec.Template.Spec.ServiceAccountName = serviceAccountName
 
-	// Apply csi provisioner toleration for csi version check job
+	// Apply csi provisioner toleration and affinity for csi version check job
 	job.Spec.Template.Spec.Tolerations = getToleration(clientset, provisionerTolerationsEnv, []corev1.Toleration{})
+	job.Spec.Template.Spec.Affinity = &corev1.Affinity{
+		NodeAffinity: getNodeAffinity(clientset, provisionerNodeAffinityEnv, &corev1.NodeAffinity{}),
+	}
 	stdout, _, retcode, err := versionReporter.Run(timeout)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to complete ceph CSI version job")

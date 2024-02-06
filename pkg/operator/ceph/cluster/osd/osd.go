@@ -31,18 +31,17 @@ import (
 	"github.com/coreos/pkg/capnslog"
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	osdconfig "github.com/rook/rook/pkg/operator/ceph/cluster/osd/config"
 	"github.com/rook/rook/pkg/operator/ceph/controller"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/k8sutil"
-	"github.com/rook/rook/pkg/util"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 var (
@@ -76,7 +75,7 @@ type Cluster struct {
 	clusterInfo  *cephclient.ClusterInfo
 	rookVersion  string
 	spec         cephv1.ClusterSpec
-	ValidStorage rookv1.StorageScopeSpec // valid subset of `Storage`, computed at runtime
+	ValidStorage cephv1.StorageScopeSpec // valid subset of `Storage`, computed at runtime
 	kv           *k8sutil.ConfigMapKVStore
 	deviceSets   []deviceSet
 }
@@ -123,16 +122,16 @@ type OrchestrationStatus struct {
 type osdProperties struct {
 	//crushHostname refers to the hostname or PVC name when the OSD is provisioned on Nodes or PVC block device, respectively.
 	crushHostname       string
-	devices             []rookv1.Device
+	devices             []cephv1.Device
 	pvc                 corev1.PersistentVolumeClaimVolumeSource
 	metadataPVC         corev1.PersistentVolumeClaimVolumeSource
 	walPVC              corev1.PersistentVolumeClaimVolumeSource
 	pvcSize             string
-	selection           rookv1.Selection
+	selection           cephv1.Selection
 	resources           corev1.ResourceRequirements
 	storeConfig         osdconfig.StoreConfig
-	placement           rookv1.Placement
-	preparePlacement    *rookv1.Placement
+	placement           cephv1.Placement
+	preparePlacement    *cephv1.Placement
 	metadataDevice      string
 	portable            bool
 	tuneSlowDeviceClass bool
@@ -154,7 +153,7 @@ func (osdProps osdProperties) onPVCWithWal() bool {
 	return osdProps.walPVC.ClaimName != ""
 }
 
-func (osdProps osdProperties) getPreparePlacement() rookv1.Placement {
+func (osdProps osdProperties) getPreparePlacement() cephv1.Placement {
 	// If the osd prepare placement is specified, use it
 	if osdProps.preparePlacement != nil {
 		return *osdProps.preparePlacement
@@ -200,21 +199,21 @@ func (c *Cluster) Start() error {
 	updateConfig := c.newUpdateConfig(config, updateQueue, deployments)
 
 	// prepare for creating new OSDs
-	statusConfigMaps := util.NewSet()
+	statusConfigMaps := sets.NewString()
 
 	logger.Info("start provisioning the OSDs on PVCs, if needed")
 	pvcConfigMaps, err := c.startProvisioningOverPVCs(config, errs)
 	if err != nil {
 		return err
 	}
-	statusConfigMaps.AddSet(pvcConfigMaps)
+	statusConfigMaps = statusConfigMaps.Union(pvcConfigMaps)
 
 	logger.Info("start provisioning the OSDs on nodes, if needed")
 	nodeConfigMaps, err := c.startProvisioningOverNodes(config, errs)
 	if err != nil {
 		return err
 	}
-	statusConfigMaps.AddSet(nodeConfigMaps.Copy())
+	statusConfigMaps = statusConfigMaps.Union(nodeConfigMaps)
 
 	createConfig := c.newCreateConfig(config, statusConfigMaps, deployments)
 
@@ -240,7 +239,7 @@ func (c *Cluster) Start() error {
 	return nil
 }
 
-func (c *Cluster) getExistingOSDDeploymentsOnPVCs() (*util.Set, error) {
+func (c *Cluster) getExistingOSDDeploymentsOnPVCs() (sets.String, error) {
 	ctx := context.TODO()
 	listOpts := metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=%s,%s", k8sutil.AppAttr, AppName, OSDOverPVCLabelKey)}
 
@@ -249,10 +248,10 @@ func (c *Cluster) getExistingOSDDeploymentsOnPVCs() (*util.Set, error) {
 		return nil, errors.Wrap(err, "failed to query existing OSD deployments")
 	}
 
-	result := util.NewSet()
+	result := sets.NewString()
 	for _, deployment := range deployments.Items {
 		if pvcID, ok := deployment.Labels[OSDOverPVCLabelKey]; ok {
-			result.Add(pvcID)
+			result.Insert(pvcID)
 		}
 	}
 
@@ -311,7 +310,7 @@ func setOSDProperties(c *Cluster, osdProps osdProperties, osd OSDInfo) error {
 	return nil
 }
 
-func (c *Cluster) resolveNode(nodeName, deviceClass string) *rookv1.Node {
+func (c *Cluster) resolveNode(nodeName, deviceClass string) *cephv1.Node {
 	// fully resolve the storage config and resources for this node
 	rookNode := c.ValidStorage.ResolveNode(nodeName)
 	if rookNode == nil {

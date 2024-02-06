@@ -75,7 +75,7 @@ type osdInfo struct {
 	Name string  `json:"name"`
 	Path string  `json:"path"`
 	Tags osdTags `json:"tags"`
-	// "data" or "journal" for filestore and "block" for bluestore
+	// "block" for bluestore
 	Type string `json:"type"`
 }
 
@@ -603,7 +603,7 @@ func (a *OsdAgent) initializeDevicesRawMode(context *clusterd.Context, devices *
 				}
 
 				// Return failure
-				return errors.Wrap(err, "failed to run ceph-volume raw command") // fail return here as validation provided by ceph-volume
+				return errors.Wrapf(err, "failed to run ceph-volume raw command. %s", op) // fail return here as validation provided by ceph-volume
 			}
 			logger.Infof("%v", op)
 		} else {
@@ -808,7 +808,7 @@ func (a *OsdAgent) initializeDevicesLVMMode(context *clusterd.Context, devices *
 			}
 
 			for _, report := range cvReports {
-				if report.BlockDB != mdPath {
+				if report.BlockDB != mdPath && !strings.HasSuffix(mdPath, report.BlockDB) {
 					return errors.Errorf("wrong db device for %s, required: %s, actual: %s", report.Data, mdPath, report.BlockDB)
 				}
 			}
@@ -896,16 +896,12 @@ func GetCephVolumeLVMOSDs(context *clusterd.Context, clusterInfo *client.Cluster
 			continue
 		}
 		var osdFSID, osdDeviceClass string
-		store := "bluestore"
 		for _, osd := range osdInfo {
 			if osd.Tags.ClusterFSID != cephfsid {
 				logger.Infof("skipping osd%d: %q running on a different ceph cluster %q", id, osd.Tags.OSDFSID, osd.Tags.ClusterFSID)
 				continue
 			}
 			osdFSID = osd.Tags.OSDFSID
-			if osd.Type == "journal" {
-				store = "filestore"
-			}
 			osdDeviceClass = osd.Tags.CrushDeviceClass
 
 			// If no lv is specified let's take the one we discovered
@@ -934,7 +930,7 @@ func GetCephVolumeLVMOSDs(context *clusterd.Context, clusterInfo *client.Cluster
 			SkipLVRelease: skipLVRelease,
 			LVBackedPV:    lvBackedPV,
 			CVMode:        cvMode,
-			Store:         store,
+			Store:         "bluestore",
 			DeviceClass:   osdDeviceClass,
 		}
 		osds = append(osds, osd)
@@ -1054,6 +1050,14 @@ func GetCephVolumeRawOSDs(context *clusterd.Context, clusterInfo *client.Cluster
 
 		// If this is an encrypted OSD
 		if os.Getenv(oposd.CephVolumeEncryptedKeyEnvVarName) != "" {
+			// // Set subsystem and label for recovery and detection
+			// We use /mnt/<pvc_name> since LUKS label/subsystem must be applied on the main block device, not the resulting encrypted dm
+			mainBlock := fmt.Sprintf("/mnt/%s", os.Getenv(oposd.PVCNameEnvVarName))
+			err = setLUKSLabelAndSubsystem(context, clusterInfo, mainBlock)
+			if err != nil {
+				return nil, errors.Wrapf(err, "failed to set subsystem and label to encrypted device %q for osd %d", mainBlock, osdID)
+			}
+
 			// Close encrypted device
 			err = closeEncryptedDevice(context, block)
 			if err != nil {

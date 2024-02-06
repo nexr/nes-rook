@@ -115,7 +115,7 @@ func generateConfigFile(context *clusterd.Context, clusterInfo *ClusterInfo, pat
 
 	// create the config directory
 	if err := os.MkdirAll(pathRoot, 0744); err != nil {
-		logger.Warningf("failed to create config directory at %q. %v", pathRoot, err)
+		return "", errors.Wrapf(err, "failed to create config directory at %q", pathRoot)
 	}
 
 	configFile, err := createGlobalConfigFileSection(context, clusterInfo, globalConfig)
@@ -161,6 +161,12 @@ func mergeDefaultConfigWithRookConfigOverride(clusterdContext *clusterd.Context,
 	if err := configFile.Append([]byte(config)); err != nil {
 		return errors.Wrapf(err, "failed to load config data from %q", k8sutil.ConfigOverrideName)
 	}
+
+	// Remove any debug message setting from the config file
+	// Debug messages will be printed on stdout, rendering the output of each command unreadable, especially json output
+	// This call is idempotent and will not fail if the debug message is not present
+	configFile.Section("global").DeleteKey("debug_ms")
+	configFile.Section("global").DeleteKey("debug ms")
 
 	return nil
 }

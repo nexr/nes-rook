@@ -25,7 +25,6 @@ If after trying the suggestions found on this page and the problem is not resolv
 * [Using multiple shared filesystem (CephFS) is attempted on a kernel version older than 4.7](#using-multiple-shared-filesystem-cephfs-is-attempted-on-a-kernel-version-older-than-47)
 * [Set debug log level for all Ceph daemons](#set-debug-log-level-for-all-ceph-daemons)
 * [Activate log to file for a particular Ceph daemon](#activate-log-to-file-for-a-particular-ceph-daemon)
-* [Flex storage class versus Ceph CSI storage class](#flex-storage-class-versus-ceph-csi-storage-class)
 * [A worker node using RBD devices hangs up](#a-worker-node-using-rbd-devices-hangs-up)
 * [Too few PGs per OSD warning is shown](#too-few-pgs-per-osd-warning-is-shown)
 * [LVM metadata can be corrupted with OSD on LV-backed PVC](#lvm-metadata-can-be-corrupted-with-osd-on-lv-backed-pvc)
@@ -74,7 +73,7 @@ Here are some common commands to troubleshoot a Ceph cluster:
 
 The first two status commands provide the overall cluster health. The normal state for cluster operations is HEALTH_OK, but will still function when the state is in a HEALTH_WARN state. If you are in a WARN state, then the cluster is in a condition that it may enter the HEALTH_ERROR state at which point *all* disk I/O operations are halted. If a HEALTH_WARN state is observed, then one should take action to prevent the cluster from halting when it enters the HEALTH_ERROR state.
 
-There are many Ceph sub-commands to look at and manipulate Ceph objects, well beyond the scope this document. See the [Ceph documentation](https://docs.ceph.com/) for more details of gathering information about the health of the cluster. In addition, there are other helpful hints and some best practices located in the [Advanced Configuration section](advanced-configuration.md). Of particular note, there are scripts for collecting logs and gathering OSD information there.
+There are many Ceph sub-commands to look at and manipulate Ceph objects, well beyond the scope this document. See the [Ceph documentation](https://docs.ceph.com/) for more details of gathering information about the health of the cluster. In addition, there are other helpful hints and some best practices located in the [Advanced Configuration section](ceph-advanced-configuration.md). Of particular note, there are scripts for collecting logs and gathering OSD information there.
 
 ## Pod Using Ceph Storage Is Not Running
 
@@ -93,7 +92,7 @@ If you see that the PVC remains in **pending** state, see the topic [PVCs stay i
 
 ### Possible Solutions Summary
 
-* `rook-ceph-agent` pod is in a `CrashLoopBackOff` status because it cannot deploy its driver on a read-only filesystem: [Flexvolume configuration pre-reqs](./ceph-prerequisites.md#ceph-flexvolume-configuration)
+* `rook-ceph-agent` pod is in a `CrashLoopBackOff` status because it cannot deploy its driver on a read-only filesystem: [Flexvolume configuration pre-reqs](./prerequisites.md#ceph-flexvolume-configuration)
 * Persistent Volume and/or Claim are failing to be created and bound: [Volume Creation](#volume-creation)
 * `rook-ceph-agent` pod is failing to mount and format the volume: [Rook Agent Mounting](#volume-mounting)
 
@@ -166,7 +165,7 @@ First, clean up the agent deployment with:
 kubectl -n rook-ceph delete daemonset rook-ceph-agent
 ```
 
-Once the `rook-ceph-agent` pods are gone, **follow the instructions in the [Flexvolume configuration pre-reqs](./ceph-prerequisites.md#ceph-flexvolume-configuration)** to ensure a good value for `--volume-plugin-dir` has been provided to the Kubelet.
+Once the `rook-ceph-agent` pods are gone, **follow the instructions in the [Flexvolume configuration pre-reqs](./prerequisites.md#ceph-flexvolume-configuration)** to ensure a good value for `--volume-plugin-dir` has been provided to the Kubelet.
 After that has been configured, and the Kubelet has been restarted, start the agent pods up again by restarting `rook-operator`:
 
 ```console
@@ -345,6 +344,10 @@ There are several common causes for the mons failing to form quorum:
   for cleaning the previous cluster.
 * A firewall may be blocking the ports required for the Ceph mons to form quorum. Ensure ports 6789 and 3300 are enabled.
   See the [Ceph networking guide](https://docs.ceph.com/en/latest/rados/configuration/network-config-ref/) for more details.
+* There may be MTU mismatch between different networking components. Some networks may be more
+  susceptible to mismatch than others. If Kubernetes CNI or hosts enable jumbo frames (MTU 9000),
+  Ceph will use large packets to maximize network bandwidth. If other parts of the networking chain
+  don't support jumbo frames, this could result in lost or rejected packets unexpectedly.
 
 #### Operator fails to connect to the mon
 
@@ -825,7 +828,6 @@ They are cases where looking at Kubernetes logs is not enough for diverse reason
 
 So for each daemon, `dataDirHostPath` is used to store logs, if logging is activated.
 Rook will bindmount `dataDirHostPath` for every pod.
-As of Ceph Nautilus 14.2.1, it is possible to enable logging for a particular daemon on the fly.
 Let's say you want to enable logging for `mon.a`, but only for this daemon.
 Using the toolbox or from inside the operator run:
 
@@ -837,24 +839,6 @@ This will activate logging on the filesystem, you will be able to find logs in `
 You don't need to restart the pod, the effect will be immediate.
 
 To disable the logging on file, simply set `log_to_file` to `false`.
-
-For Ceph Luminous/Mimic releases, `mon_cluster_log_file` and `cluster_log_file` can be set to
-`/var/log/ceph/XXXX` in the config override ConfigMap to enable logging. See the (Advanced
-Documentation)[Documentation/advanced-configuration.md#kubernetes] for information about how to use
-the config override ConfigMap.
-
-For Ceph Luminous/Mimic releases, `mon_cluster_log_file` and `cluster_log_file` can be set to `/var/log/ceph/XXXX` in the config override ConfigMap to enable logging. See the [Advanced Documentation](#custom-cephconf-settings) for information about how to use the config override ConfigMap.
-
-## Flex storage class versus Ceph CSI storage class
-
-Since Rook 1.1, Ceph CSI has become stable and moving forward is the ultimate replacement over the Flex driver.
-However, not all Flex storage classes are available through Ceph CSI since it's basically catching up on features.
-Ceph CSI in its 1.2 version (with Rook 1.1) does not support the Erasure coded pools storage class.
-
-So, if you are looking at using such storage class you should enable the Flex driver by setting `ROOK_ENABLE_FLEX_DRIVER: true` in your `operator.yaml`.
-Also, if you are in the need of specific features and wonder if CSI is capable of handling them, you should read [the ceph-csi support matrix](https://github.com/ceph/ceph-csi#support-matrix).
-
-See also the [CSI Troubleshooting Guide](ceph-csi-troubleshooting.md).
 
 ## A worker node using RBD devices hangs up
 
@@ -995,7 +979,7 @@ You can see https://github.com/rook/rook/issues/7940 for more detailed informati
 
 ### Solution
 #### Recover from corruption (v1.6.0-v1.6.7)
-If you are using Rook v1.6, you must first update to v1.6.11 or higher to avoid further incidents of
+If you are using Rook v1.6, you must first update to v1.6.8 or higher to avoid further incidents of
 OSD corruption caused by these Atari partitions.
 
 An old workaround suggested using `deviceFilter: ^sd[a-z]+$`, but this still results in unexpected
@@ -1003,7 +987,7 @@ partitions. Rook will merely stop creating new OSDs on the partitions. It does n
 issue that `ceph-volume` that is unaware of the Atari partition problem. Users who used this
 workaround are still at risk for OSD failures in the future.
 
-To resolve the issue, immediately update to v1.6.11 or higher. After the update, no corruption should
+To resolve the issue, immediately update to v1.6.8 or higher. After the update, no corruption should
 occur on OSDs created in the future. Next, to get back to a healthy Ceph cluster state, focus on one
 corruped disk at a time and [remove all OSDs on each corrupted disk](ceph-osd-mgmt.md#remove-an-osd)
 one disk at a time.
@@ -1024,4 +1008,4 @@ as well as a second corrupted disk `/dev/sde` with one unexpected partition (`/d
 5. Now Repeat steps 1-4 for `/dev/sde` and `/dev/sde2`, and continue for any other corruped disks.
 
 If your Rook-Ceph cluster does not have any critical data stored in it, it may be simpler to
-uninstall Rook completely and redeploy with v1.6.11 or higher.
+uninstall Rook completely and redeploy with v1.6.8 or higher.
