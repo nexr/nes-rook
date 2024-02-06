@@ -107,7 +107,7 @@ func (v *CephVersion) ReleaseName() string {
 		case Apex.Major:
 			return "apex"
 		case Belfry.Major:
-			return "apex"
+			return "belfry"
 		default:
 			return unknownVersionString
 		}
